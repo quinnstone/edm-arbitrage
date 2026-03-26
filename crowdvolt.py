@@ -196,26 +196,48 @@ def fetch_event(slug: str) -> Optional[CrowdVoltEvent]:
 
 
 def fetch_all_events() -> list[CrowdVoltEvent]:
-    """Fetch all active CrowdVolt events with marketplace data."""
+    """Fetch all active CrowdVolt events with marketplace data.
+
+    Uses a thread pool to fetch pages concurrently (respecting a semaphore
+    so we don't hammer CrowdVolt too hard).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
     print("[CrowdVolt] Fetching sitemap...")
     slugs = fetch_sitemap()
     print(f"[CrowdVolt] Found {len(slugs)} event URLs in sitemap")
 
     events = []
-    for i, slug in enumerate(slugs):
-        event = fetch_event(slug)
-        if event:
-            has_market = len(event.asks) > 0 or len(event.bids) > 0
-            status = "active" if has_market else "no listings"
-            print(f"  [{i+1}/{len(slugs)}] {event.name} — {status}")
-            if has_market:
-                events.append(event)
-        else:
-            print(f"  [{i+1}/{len(slugs)}] {slug} — skipped (not found)")
+    lock = threading.Lock()
+    # Limit concurrency to 5 parallel requests
+    semaphore = threading.Semaphore(5)
 
-        # Be polite with request spacing
-        if i < len(slugs) - 1:
-            time.sleep(config.REQUEST_DELAY_SECONDS)
+    def _fetch_one(slug: str, index: int):
+        with semaphore:
+            event = fetch_event(slug)
+            time.sleep(0.3)  # small delay per request
+        return index, slug, event
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {
+            pool.submit(_fetch_one, slug, i): slug
+            for i, slug in enumerate(slugs)
+        }
+
+        done_count = 0
+        for future in as_completed(futures):
+            done_count += 1
+            index, slug, event = future.result()
+            if event:
+                has_market = len(event.asks) > 0 or len(event.bids) > 0
+                if has_market:
+                    with lock:
+                        events.append(event)
+                    print(f"  [{done_count}/{len(slugs)}] {event.name} — active")
+            # Only log every 50th skip to reduce noise
+            elif done_count % 50 == 0:
+                print(f"  [{done_count}/{len(slugs)}] scanning...")
 
     print(f"[CrowdVolt] {len(events)} events with active listings")
     return events

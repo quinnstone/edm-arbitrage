@@ -26,4 +26,4 @@ CROWDVOLT_BASE_URL = "https://www.crowdvolt.com"
 
 # Request settings
 REQUEST_TIMEOUT = 15
-REQUEST_DELAY_SECONDS = 2  # delay between CrowdVolt page fetches to be polite
+REQUEST_DELAY_SECONDS = 1.5  # delay between CrowdVolt page fetches to be polite
