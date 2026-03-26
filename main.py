@@ -1,4 +1,4 @@
-"""Ticket arbitrage scanner — CrowdVolt vs SeatGeek + Ticketmaster.
+"""Ticket arbitrage scanner — CrowdVolt vs SeatGeek + Ticketmaster + TickPick.
 
 Usage:
     python main.py              # run once
@@ -17,6 +17,7 @@ import matcher
 import notifier
 import seatgeek
 import ticketmaster
+import tickpick
 
 
 def scan_once() -> int:
@@ -32,17 +33,14 @@ def scan_once() -> int:
         notifier.send_summary(0, 0, 0)
         return 0
 
-    # Step 2: For each CrowdVolt event, search SeatGeek + Ticketmaster
+    # Step 2: For each CrowdVolt event, search all sources
     all_opportunities = []
     errors = 0
 
     for cv_event in cv_events:
         print(f"\n[Match] {cv_event.name} (ask: ${cv_event.min_ask}, bid: ${cv_event.max_bid or 'none'})")
 
-        # Build search query from event name
         query = cv_event.name
-
-        # Date string for filtering
         date_str = None
         if cv_event.event_date:
             date_str = cv_event.event_date.strftime("%Y-%m-%d")
@@ -69,6 +67,18 @@ def scan_once() -> int:
                 all_opportunities.extend(tm_opps)
         except Exception as e:
             print(f"  [Ticketmaster] Error: {e}")
+            errors += 1
+
+        # Search TickPick (no API key needed)
+        try:
+            tp_results = tickpick.search_events(query, date_str)
+            if tp_results:
+                tp_opps = matcher.match_tickpick(cv_event, tp_results)
+                for opp in tp_opps:
+                    _log_opportunity(opp)
+                all_opportunities.extend(tp_opps)
+        except Exception as e:
+            print(f"  [TickPick] Error: {e}")
             errors += 1
 
         # Small delay between event lookups to respect rate limits
@@ -146,23 +156,32 @@ def test_single():
     for bid in event.bids:
         print(f"  Buy: {bid.user} — ${bid.price} x{bid.qty} [{bid.ticket_type}]")
 
-    # Try matching
+    # SeatGeek
     print(f"\n[Test] Searching SeatGeek for '{event.name}'...")
     sg_results = seatgeek.search_events(event.name)
     print(f"[Test] SeatGeek returned {len(sg_results)} results")
     for sg in sg_results[:5]:
         print(f"  {sg.title} — ${sg.lowest_price} at {sg.venue}")
 
+    # Ticketmaster
     print(f"\n[Test] Searching Ticketmaster for '{event.name}'...")
     tm_results = ticketmaster.search_events(event.name)
     print(f"[Test] Ticketmaster returned {len(tm_results)} results")
     for tm in tm_results[:5]:
         print(f"  {tm.name} — ${tm.min_price}-${tm.max_price} at {tm.venue}")
 
+    # TickPick
+    print(f"\n[Test] Searching TickPick for '{event.name}'...")
+    tp_results = tickpick.search_events(event.name)
+    print(f"[Test] TickPick returned {len(tp_results)} results")
+    for tp in tp_results[:5]:
+        print(f"  {tp.name} — ${tp.low_price}-${tp.high_price} at {tp.venue}")
+
     # Check matches
     sg_opps = matcher.match_seatgeek(event, sg_results)
     tm_opps = matcher.match_ticketmaster(event, tm_results)
-    all_opps = sg_opps + tm_opps
+    tp_opps = matcher.match_tickpick(event, tp_results)
+    all_opps = sg_opps + tm_opps + tp_opps
 
     print(f"\n[Test] {len(all_opps)} potential matches found")
     for opp in all_opps:
@@ -185,14 +204,8 @@ def main():
     parser.add_argument("--test", action="store_true", help="Test with a single event")
     args = parser.parse_args()
 
-    # Validate config
-    has_api = bool(config.SEATGEEK_CLIENT_ID or config.TICKETMASTER_API_KEY)
-    if not has_api:
-        print("ERROR: Set at least one API key:")
-        print("  export SEATGEEK_CLIENT_ID='your_key'")
-        print("  export TICKETMASTER_API_KEY='your_key'")
-        sys.exit(1)
-
+    # TickPick requires no API key, so we can always run.
+    # SeatGeek/Ticketmaster are optional additions.
     if not config.DISCORD_WEBHOOK_URL:
         print("ERROR: Set DISCORD_WEBHOOK_URL")
         sys.exit(1)

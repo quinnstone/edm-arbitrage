@@ -1,4 +1,4 @@
-"""Match CrowdVolt events against SeatGeek and Ticketmaster listings."""
+"""Match CrowdVolt events against SeatGeek, Ticketmaster, and TickPick listings."""
 
 from dataclasses import dataclass
 from datetime import timedelta
@@ -9,6 +9,7 @@ from thefuzz import fuzz
 from crowdvolt import CrowdVoltEvent
 from seatgeek import SeatGeekEvent
 from ticketmaster import TicketmasterEvent
+from tickpick import TickPickEvent
 
 
 @dataclass
@@ -146,6 +147,46 @@ def match_ticketmaster(
 
         if cv_event.max_bid is not None:
             opp.profit_vs_bid = cv_event.max_bid - tm.min_price
+
+        opportunities.append(opp)
+
+    return opportunities
+
+
+def match_tickpick(
+    cv_event: CrowdVoltEvent,
+    tp_events: list[TickPickEvent],
+) -> list[ArbitrageOpportunity]:
+    """Find TickPick listings cheaper than CrowdVolt asks/bids."""
+    opportunities = []
+
+    for tp in tp_events:
+        score = _name_similarity(cv_event.name, tp.name)
+        if score < MATCH_THRESHOLD:
+            continue
+
+        if not _dates_match(cv_event.event_date, tp.event_date):
+            continue
+
+        if tp.low_price is None:
+            continue
+
+        opp = ArbitrageOpportunity(
+            crowdvolt_event=cv_event,
+            source_platform="TickPick",
+            source_price=tp.low_price,
+            source_url=tp.url,
+            crowdvolt_ask=cv_event.min_ask,
+            crowdvolt_bid=cv_event.max_bid,
+            profit_vs_ask=None,
+            profit_vs_bid=None,
+        )
+
+        if cv_event.min_ask is not None:
+            opp.profit_vs_ask = cv_event.min_ask - tp.low_price
+
+        if cv_event.max_bid is not None:
+            opp.profit_vs_bid = cv_event.max_bid - tp.low_price
 
         opportunities.append(opp)
 
