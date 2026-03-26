@@ -113,25 +113,21 @@ def _log_opportunity(opp):
 
 
 def _filter_opportunities(opps: list) -> list:
-    """Keep only opportunities that meet profit thresholds."""
+    """Keep only opportunities where an active CrowdVolt bid exists.
+
+    Only alerts when someone on CrowdVolt is actively offering to buy
+    at a price higher than what you'd pay on the source platform.
+    No bid = no guaranteed buyer = no alert.
+    """
     filtered = []
 
     for opp in opps:
-        # Priority 1: Can fill an existing bid (guaranteed buyer)
+        # ONLY alert when there is an active bid we can profit from
         if opp.profit_vs_bid is not None and opp.profit_vs_bid > 0:
             margin = (opp.profit_vs_bid / opp.source_price) * 100
             if (opp.profit_vs_bid >= config.MIN_PROFIT_THRESHOLD
                     and margin >= config.MIN_PROFIT_MARGIN_PCT):
                 filtered.append(opp)
-                continue
-
-        # Priority 2: Can undercut lowest ask (need to find a buyer)
-        if opp.profit_vs_ask is not None and opp.profit_vs_ask > 0:
-            margin = (opp.profit_vs_ask / opp.source_price) * 100
-            if (opp.profit_vs_ask >= config.MIN_PROFIT_THRESHOLD
-                    and margin >= config.MIN_PROFIT_MARGIN_PCT):
-                filtered.append(opp)
-                continue
 
     return filtered
 

@@ -10,13 +10,23 @@ def _format_opportunity(opp: ArbitrageOpportunity) -> dict:
     """Format an arbitrage opportunity as a Discord embed."""
     cv = opp.crowdvolt_event
 
-    # Header color: green if profit vs bid, yellow if only vs ask
-    color = 0x00FF00 if opp.profit_vs_bid and opp.profit_vs_bid > 0 else 0xFFAA00
+    margin = (opp.profit_vs_bid / opp.source_price) * 100
+    color = 0x00FF00  # green — all alerts now require an active bid
 
     fields = [
         {
             "name": "Buy On",
-            "value": f"**{opp.source_platform}** — ${opp.source_price:.0f}",
+            "value": f"**{opp.source_platform}** — **${opp.source_price:.0f}**",
+            "inline": True,
+        },
+        {
+            "name": "Sell To (Active Bid)",
+            "value": f"**${opp.crowdvolt_bid:.0f}** on CrowdVolt",
+            "inline": True,
+        },
+        {
+            "name": "Profit",
+            "value": f"**+${opp.profit_vs_bid:.0f}** ({margin:.1f}%)",
             "inline": True,
         },
     ]
@@ -25,30 +35,6 @@ def _format_opportunity(opp: ArbitrageOpportunity) -> dict:
         fields.append({
             "name": "CrowdVolt Lowest Ask",
             "value": f"${opp.crowdvolt_ask:.0f}",
-            "inline": True,
-        })
-
-    if opp.crowdvolt_bid is not None:
-        fields.append({
-            "name": "CrowdVolt Highest Bid",
-            "value": f"${opp.crowdvolt_bid:.0f}",
-            "inline": True,
-        })
-
-    # Profit lines
-    if opp.profit_vs_bid is not None and opp.profit_vs_bid > 0:
-        margin = (opp.profit_vs_bid / opp.source_price) * 100
-        fields.append({
-            "name": "Profit (Fill Bid)",
-            "value": f"**+${opp.profit_vs_bid:.0f}** ({margin:.1f}%)",
-            "inline": True,
-        })
-
-    if opp.profit_vs_ask is not None and opp.profit_vs_ask > 0:
-        margin = (opp.profit_vs_ask / opp.source_price) * 100
-        fields.append({
-            "name": "Spread vs Ask",
-            "value": f"**+${opp.profit_vs_ask:.0f}** ({margin:.1f}%)",
             "inline": True,
         })
 
