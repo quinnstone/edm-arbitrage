@@ -66,6 +66,28 @@ def _name_similarity(name1: str, name2: str) -> int:
 
 MATCH_THRESHOLD = 70  # minimum fuzzy score to consider a match
 
+# Cities that should be treated as equivalent
+CITY_ALIASES = {
+    "nyc": "new york", "brooklyn": "new york", "queens": "new york",
+    "la": "los angeles", "hollywood": "los angeles",
+    "miami beach": "miami", "south beach": "miami",
+    "sf": "san francisco",
+}
+
+
+def _cities_match(city1: str, city2: str) -> bool:
+    """Check if two city strings refer to the same metro area."""
+    if not city1 or not city2:
+        return True  # if either is missing, allow through
+
+    c1 = city1.lower().strip()
+    c2 = city2.lower().strip()
+
+    c1 = CITY_ALIASES.get(c1, c1)
+    c2 = CITY_ALIASES.get(c2, c2)
+
+    return c1 == c2 or c1 in c2 or c2 in c1
+
 
 def match_seatgeek(
     cv_event: CrowdVoltEvent,
@@ -75,16 +97,13 @@ def match_seatgeek(
     opportunities = []
 
     for sg in sg_events:
-        # Check name similarity
         score = _name_similarity(cv_event.name, sg.title)
         if score < MATCH_THRESHOLD:
             continue
-
-        # Check date proximity
         if not _dates_match(cv_event.event_date, sg.event_date):
             continue
-
-        # Use lowest SeatGeek price as the buy price
+        if not _cities_match(cv_event.city, sg.city):
+            continue
         if sg.lowest_price is None:
             continue
 
@@ -123,11 +142,10 @@ def match_ticketmaster(
         score = _name_similarity(cv_event.name, tm.name)
         if score < MATCH_THRESHOLD:
             continue
-
         if not _dates_match(cv_event.event_date, tm.event_date):
             continue
-
-        # Use Ticketmaster min price as the buy price
+        if not _cities_match(cv_event.city, tm.city):
+            continue
         if tm.min_price is None:
             continue
 
@@ -164,10 +182,10 @@ def match_tickpick(
         score = _name_similarity(cv_event.name, tp.name)
         if score < MATCH_THRESHOLD:
             continue
-
         if not _dates_match(cv_event.event_date, tp.event_date):
             continue
-
+        if not _cities_match(cv_event.city, tp.city):
+            continue
         if tp.low_price is None:
             continue
 
