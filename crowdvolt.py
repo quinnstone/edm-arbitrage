@@ -13,6 +13,8 @@ from dateutil import parser as dateparser
 
 import config
 
+PREMIUM_KEYWORDS = {"vip", "platinum", "backstage", "meet & greet", "meet and greet"}
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -186,11 +188,16 @@ def fetch_event(slug: str) -> Optional[CrowdVoltEvent]:
         event.bids = _parse_listings(book.get("buy", []))
         event.asks = _parse_listings(book.get("sell", []))
 
-    # Compute summary prices
-    if event.asks:
-        event.min_ask = min(a.all_in_price for a in event.asks)
-    if event.bids:
-        event.max_bid = max(b.all_in_price for b in event.bids)
+    # Compute summary prices excluding premium tiers so we don't
+    # compare VIP bids against GA asks from external sources.
+    ga_asks = [a for a in event.asks
+               if not any(k in a.ticket_type.lower() for k in PREMIUM_KEYWORDS)]
+    ga_bids = [b for b in event.bids
+               if not any(k in b.ticket_type.lower() for k in PREMIUM_KEYWORDS)]
+    if ga_asks:
+        event.min_ask = min(a.all_in_price for a in ga_asks)
+    if ga_bids:
+        event.max_bid = max(b.all_in_price for b in ga_bids)
 
     return event
 
