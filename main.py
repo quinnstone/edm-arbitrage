@@ -89,34 +89,39 @@ def scan_once() -> int:
             errors += 1
 
         # --- Playwright-based sources (slower, headless browser) ---
+        # Only run for events with active bids — no bid means no
+        # guaranteed buyer, so no point spending 10-15s per browser load.
 
-        # Search StubHub
-        try:
-            sh_results = stubhub.search_events(query, date_str)
-            if sh_results:
-                sh_opps = matcher.match_stubhub(cv_event, sh_results)
-                if sh_opps:
-                    event_matched = True
-                for opp in sh_opps:
-                    _log_opportunity(opp)
-                all_opportunities.extend(sh_opps)
-        except Exception as e:
-            print(f"  [StubHub] Error: {e}")
-            errors += 1
+        if cv_event.max_bid is not None:
+            # Search StubHub
+            try:
+                sh_results = stubhub.search_events(query, date_str)
+                if sh_results:
+                    sh_opps = matcher.match_stubhub(cv_event, sh_results)
+                    if sh_opps:
+                        event_matched = True
+                    for opp in sh_opps:
+                        _log_opportunity(opp)
+                    all_opportunities.extend(sh_opps)
+            except Exception as e:
+                print(f"  [StubHub] Error: {e}")
+                errors += 1
 
-        # Search VividSeats
-        try:
-            vs_results = vividseats.search_events(query, date_str)
-            if vs_results:
-                vs_opps = matcher.match_vividseats(cv_event, vs_results)
-                if vs_opps:
-                    event_matched = True
-                for opp in vs_opps:
-                    _log_opportunity(opp)
-                all_opportunities.extend(vs_opps)
-        except Exception as e:
-            print(f"  [VividSeats] Error: {e}")
-            errors += 1
+            # Search VividSeats
+            try:
+                vs_results = vividseats.search_events(query, date_str)
+                if vs_results:
+                    vs_opps = matcher.match_vividseats(cv_event, vs_results)
+                    if vs_opps:
+                        event_matched = True
+                    for opp in vs_opps:
+                        _log_opportunity(opp)
+                    all_opportunities.extend(vs_opps)
+            except Exception as e:
+                print(f"  [VividSeats] Error: {e}")
+                errors += 1
+        else:
+            print(f"  [StubHub/VividSeats] Skipped — no active bids")
 
         if not event_matched:
             print(f"  [No Match] Could not match on any platform")

@@ -179,10 +179,6 @@ def _extract_from_search(page) -> list[StubHubEvent]:
         except Exception:
             continue
 
-    # Strategy 2: If no cards found, try extracting from any JSON in the page
-    if not events:
-        events = _extract_from_json(page)
-
     return events
 
 
@@ -228,11 +224,24 @@ def _parse_next_data(data: dict) -> list[StubHubEvent]:
                 if isinstance(price, dict):
                     price = price.get("amount")
                 if name and price:
+                    dt = None
+                    date_val = obj.get("eventDate", obj.get("date",
+                               obj.get("startDate", "")))
+                    if date_val:
+                        try:
+                            dt = dateparser.parse(str(date_val))
+                        except (ValueError, TypeError):
+                            pass
+
+                    venue_val = obj.get("venue", obj.get("venueName", ""))
+                    if isinstance(venue_val, dict):
+                        venue_val = venue_val.get("name", "")
+
                     events.append(StubHubEvent(
                         name=str(name),
-                        venue=obj.get("venue", obj.get("venueName", "")),
+                        venue=str(venue_val),
                         city=obj.get("city", ""),
-                        event_date=None,
+                        event_date=dt,
                         min_price=float(price),
                         url=obj.get("url", ""),
                     ))
