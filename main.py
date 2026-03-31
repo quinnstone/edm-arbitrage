@@ -37,8 +37,8 @@ def scan_once() -> int:
     # Track bid availability
     events_with_bids = sum(1 for e in cv_events if e.max_bid is not None)
     events_with_asks_only = len(cv_events) - events_with_bids
-    print(f"[Scan] Bid availability: {events_with_bids}/{len(cv_events)} events have active bids "
-          f"({events_with_asks_only} asks-only)")
+    print(f"[Scan] {events_with_bids}/{len(cv_events)} events have waiting buyers, "
+          f"{events_with_asks_only} have sellers only")
 
     # Step 2: For each CrowdVolt event, search all sources
     all_opportunities = []
@@ -46,7 +46,8 @@ def scan_once() -> int:
     match_failures = 0
 
     for cv_event in cv_events:
-        print(f"\n[Match] {cv_event.name} (ask: ${cv_event.min_ask}, bid: ${cv_event.max_bid or 'none'})")
+        buyer_str = f"${cv_event.max_bid:.0f}" if cv_event.max_bid else "none"
+        print(f"\n[Match] {cv_event.name} (lowest seller: ${cv_event.min_ask}, highest buyer: {buyer_str})")
 
         # Extract clean artist name for better search results
         query = matcher.extract_artist_name(cv_event.name)
@@ -121,7 +122,7 @@ def scan_once() -> int:
                 print(f"  [VividSeats] Error: {e}")
                 errors += 1
         else:
-            print(f"  [StubHub/VividSeats] Skipped — no active bids")
+            print(f"  [StubHub/VividSeats] Skipped — no waiting buyers")
 
         if not event_matched:
             print(f"  [No Match] Could not match on any platform")
@@ -155,9 +156,9 @@ def _log_opportunity(opp):
 
     parts = [f"  [{label}] ${src:.0f}"]
     if opp.profit_vs_bid is not None:
-        parts.append(f"vs bid ${opp.crowdvolt_bid:.0f} → profit ${opp.profit_vs_bid:.0f}")
+        parts.append(f"vs buyer ${opp.crowdvolt_bid:.0f} → profit ${opp.profit_vs_bid:.0f}")
     if opp.profit_vs_ask is not None:
-        parts.append(f"vs ask ${opp.crowdvolt_ask:.0f} → spread ${opp.profit_vs_ask:.0f}")
+        parts.append(f"vs seller ${opp.crowdvolt_ask:.0f} → spread ${opp.profit_vs_ask:.0f}")
 
     print(" | ".join(parts))
 
@@ -194,13 +195,13 @@ def test_single():
     print(f"[Test] Event: {event.name}")
     print(f"[Test] Venue: {event.venue} — {event.city}")
     print(f"[Test] Date: {event.event_date}")
-    print(f"[Test] Asks: {len(event.asks)} (lowest: ${event.min_ask})")
-    print(f"[Test] Bids: {len(event.bids)} (highest: ${event.max_bid or 'none'})")
+    print(f"[Test] Sellers: {len(event.asks)} (lowest: ${event.min_ask})")
+    print(f"[Test] Buyers: {len(event.bids)} (highest: ${event.max_bid or 'none'})")
 
     for ask in event.asks:
-        print(f"  Sell: {ask.user} — ${ask.price} (${ask.all_in_price} all-in) x{ask.qty} [{ask.ticket_type}]")
+        print(f"  Seller: {ask.user} — ${ask.price} (${ask.all_in_price} all-in) x{ask.qty} [{ask.ticket_type}]")
     for bid in event.bids:
-        print(f"  Buy: {bid.user} — ${bid.price} (${bid.all_in_price} all-in) x{bid.qty} [{bid.ticket_type}]")
+        print(f"  Buyer: {bid.user} — ${bid.price} (${bid.all_in_price} all-in) x{bid.qty} [{bid.ticket_type}]")
 
     # Extract query
     query = matcher.extract_artist_name(event.name)

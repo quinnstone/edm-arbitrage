@@ -11,7 +11,7 @@ def _format_opportunity(opp: ArbitrageOpportunity) -> dict:
     cv = opp.crowdvolt_event
 
     margin = (opp.profit_vs_bid / opp.source_price) * 100
-    color = 0x00FF00  # green — all alerts now require an active bid
+    color = 0x00FF00  # green — all alerts require a waiting buyer
 
     fields = [
         {
@@ -20,7 +20,7 @@ def _format_opportunity(opp: ArbitrageOpportunity) -> dict:
             "inline": True,
         },
         {
-            "name": "Sell To (Active Bid)",
+            "name": "Sell To (Waiting Buyer)",
             "value": f"**${opp.crowdvolt_bid:.0f}** on CrowdVolt",
             "inline": True,
         },
@@ -33,25 +33,25 @@ def _format_opportunity(opp: ArbitrageOpportunity) -> dict:
 
     if opp.crowdvolt_ask is not None:
         fields.append({
-            "name": "CrowdVolt Lowest Ask",
+            "name": "Lowest Seller on CrowdVolt",
             "value": f"${opp.crowdvolt_ask:.0f}",
             "inline": True,
         })
 
-    # Bid details
+    # People looking to buy (bids)
     if cv.bids:
         bid_lines = [f"• {b.user}: ${b.price:.0f} x{b.qty} ({b.ticket_type})" for b in cv.bids[:5]]
         fields.append({
-            "name": f"Active Bids ({len(cv.bids)})",
+            "name": f"Buyers Waiting ({len(cv.bids)})",
             "value": "\n".join(bid_lines),
             "inline": False,
         })
 
-    # Ask details
+    # People selling (asks)
     if cv.asks:
         ask_lines = [f"• {a.user}: ${a.price:.0f} x{a.qty} ({a.ticket_type})" for a in cv.asks[:5]]
         fields.append({
-            "name": f"Active Asks ({len(cv.asks)})",
+            "name": f"Sellers Listed ({len(cv.asks)})",
             "value": "\n".join(ask_lines),
             "inline": False,
         })
@@ -115,9 +115,9 @@ def send_summary(
     sources_str = " · ".join(sources)
 
     if events_with_bids == 0:
-        browser_note = "StubHub/VividSeats skipped (no active bids)"
+        browser_note = "StubHub/VividSeats skipped (no waiting buyers)"
     else:
-        browser_note = f"StubHub/VividSeats ran for **{events_with_bids}** events with bids"
+        browser_note = f"StubHub/VividSeats ran for **{events_with_bids}** events with waiting buyers"
 
     payload = {
         "username": "Ticket Arb",
@@ -125,7 +125,8 @@ def send_summary(
             "title": "Scan Complete",
             "description": (
                 f"**{total_events}** CrowdVolt events scanned\n"
-                f"**{events_with_bids}** with active bids · **{asks_only}** asks-only\n"
+                f"**{events_with_bids}** with waiting buyers · "
+                f"**{asks_only}** sellers only\n"
                 f"**{opportunities}** arbitrage opportunities found\n"
                 f"**{match_failures}** events with no cross-platform match\n"
                 f"**{errors}** API/scrape errors\n\n"
