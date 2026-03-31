@@ -105,6 +105,20 @@ def send_summary(
     """Send a scan summary to Discord."""
     asks_only = total_events - events_with_bids
 
+    # Show which sources ran
+    sources = ["TickPick"]
+    from config import SEATGEEK_CLIENT_ID
+    if SEATGEEK_CLIENT_ID:
+        sources.append("SeatGeek")
+    if events_with_bids > 0:
+        sources.extend(["StubHub", "VividSeats"])
+    sources_str = " · ".join(sources)
+
+    if events_with_bids == 0:
+        browser_note = "StubHub/VividSeats skipped (no active bids)"
+    else:
+        browser_note = f"StubHub/VividSeats ran for **{events_with_bids}** events with bids"
+
     payload = {
         "username": "Ticket Arb",
         "embeds": [{
@@ -114,7 +128,9 @@ def send_summary(
                 f"**{events_with_bids}** with active bids · **{asks_only}** asks-only\n"
                 f"**{opportunities}** arbitrage opportunities found\n"
                 f"**{match_failures}** events with no cross-platform match\n"
-                f"**{errors}** API/scrape errors"
+                f"**{errors}** API/scrape errors\n\n"
+                f"Sources: {sources_str}\n"
+                f"{browser_note}"
             ),
             "color": 0x5865F2,
         }],
