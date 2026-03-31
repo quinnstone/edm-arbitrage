@@ -95,16 +95,26 @@ def send_alert(opp: ArbitrageOpportunity) -> bool:
         return False
 
 
-def send_summary(total_events: int, opportunities: int, errors: int) -> bool:
+def send_summary(
+    total_events: int,
+    opportunities: int,
+    errors: int,
+    events_with_bids: int = 0,
+    match_failures: int = 0,
+) -> bool:
     """Send a scan summary to Discord."""
+    asks_only = total_events - events_with_bids
+
     payload = {
         "username": "Ticket Arb",
         "embeds": [{
             "title": "Scan Complete",
             "description": (
                 f"**{total_events}** CrowdVolt events scanned\n"
+                f"**{events_with_bids}** with active bids · **{asks_only}** asks-only\n"
                 f"**{opportunities}** arbitrage opportunities found\n"
-                f"**{errors}** errors"
+                f"**{match_failures}** events with no cross-platform match\n"
+                f"**{errors}** API/scrape errors"
             ),
             "color": 0x5865F2,
         }],

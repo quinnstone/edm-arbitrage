@@ -188,9 +188,9 @@ def fetch_event(slug: str) -> Optional[CrowdVoltEvent]:
 
     # Compute summary prices
     if event.asks:
-        event.min_ask = min(a.price for a in event.asks)
+        event.min_ask = min(a.all_in_price for a in event.asks)
     if event.bids:
-        event.max_bid = max(b.price for b in event.bids)
+        event.max_bid = max(b.all_in_price for b in event.bids)
 
     return event
 

@@ -1,4 +1,4 @@
-"""Match CrowdVolt events against SeatGeek, Ticketmaster, and TickPick listings."""
+"""Match CrowdVolt events against SeatGeek and TickPick listings."""
 
 from dataclasses import dataclass
 from datetime import timedelta
@@ -8,7 +8,6 @@ from thefuzz import fuzz
 
 from crowdvolt import CrowdVoltEvent
 from seatgeek import SeatGeekEvent
-from ticketmaster import TicketmasterEvent
 from tickpick import TickPickEvent
 
 
@@ -24,10 +23,11 @@ class ArbitrageOpportunity:
     profit_vs_bid: Optional[float]  # if you fill an existing bid
 
 
-def _extract_artist_name(event_name: str) -> str:
+def extract_artist_name(event_name: str) -> str:
     """Pull the core artist name from an event string.
 
     Strips common suffixes like venue info, date fragments, and festival qualifiers.
+    Used both for fuzzy matching and as the search query for external platforms.
     """
     # Remove common noise words for matching
     name = event_name.lower()
@@ -55,8 +55,8 @@ def _dates_match(dt1, dt2, tolerance_days: int = 1) -> bool:
 
 def _name_similarity(name1: str, name2: str) -> int:
     """Score 0-100 for how similar two event/artist names are."""
-    a = _extract_artist_name(name1)
-    b = _extract_artist_name(name2)
+    a = extract_artist_name(name1)
+    b = extract_artist_name(name2)
     return max(
         fuzz.ratio(a, b),
         fuzz.partial_ratio(a, b),
@@ -125,46 +125,6 @@ def match_seatgeek(
         # Calculate profit if you fill an existing CrowdVolt bid
         if cv_event.max_bid is not None:
             opp.profit_vs_bid = cv_event.max_bid - sg.lowest_price
-
-        opportunities.append(opp)
-
-    return opportunities
-
-
-def match_ticketmaster(
-    cv_event: CrowdVoltEvent,
-    tm_events: list[TicketmasterEvent],
-) -> list[ArbitrageOpportunity]:
-    """Find Ticketmaster listings cheaper than CrowdVolt asks/bids."""
-    opportunities = []
-
-    for tm in tm_events:
-        score = _name_similarity(cv_event.name, tm.name)
-        if score < MATCH_THRESHOLD:
-            continue
-        if not _dates_match(cv_event.event_date, tm.event_date):
-            continue
-        if not _cities_match(cv_event.city, tm.city):
-            continue
-        if tm.min_price is None:
-            continue
-
-        opp = ArbitrageOpportunity(
-            crowdvolt_event=cv_event,
-            source_platform="Ticketmaster",
-            source_price=tm.min_price,
-            source_url=tm.url,
-            crowdvolt_ask=cv_event.min_ask,
-            crowdvolt_bid=cv_event.max_bid,
-            profit_vs_ask=None,
-            profit_vs_bid=None,
-        )
-
-        if cv_event.min_ask is not None:
-            opp.profit_vs_ask = cv_event.min_ask - tm.min_price
-
-        if cv_event.max_bid is not None:
-            opp.profit_vs_bid = cv_event.max_bid - tm.min_price
 
         opportunities.append(opp)
 
