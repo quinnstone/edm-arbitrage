@@ -1,4 +1,4 @@
-"""Match CrowdVolt events against SeatGeek and TickPick listings."""
+"""Match CrowdVolt events against SeatGeek, TickPick, StubHub, and VividSeats."""
 
 from dataclasses import dataclass
 from datetime import timedelta
@@ -8,13 +8,15 @@ from thefuzz import fuzz
 
 from crowdvolt import CrowdVoltEvent
 from seatgeek import SeatGeekEvent
+from stubhub import StubHubEvent
 from tickpick import TickPickEvent
+from vividseats import VividSeatsEvent
 
 
 @dataclass
 class ArbitrageOpportunity:
     crowdvolt_event: CrowdVoltEvent
-    source_platform: str  # "SeatGeek" or "Ticketmaster"
+    source_platform: str  # "SeatGeek", "TickPick", "StubHub", or "VividSeats"
     source_price: float  # price you'd buy at
     source_url: str
     crowdvolt_ask: Optional[float]  # lowest ask on CrowdVolt (what sellers want)
@@ -165,6 +167,86 @@ def match_tickpick(
 
         if cv_event.max_bid is not None:
             opp.profit_vs_bid = cv_event.max_bid - tp.low_price
+
+        opportunities.append(opp)
+
+    return opportunities
+
+
+def match_stubhub(
+    cv_event: CrowdVoltEvent,
+    sh_events: list[StubHubEvent],
+) -> list[ArbitrageOpportunity]:
+    """Find StubHub listings cheaper than CrowdVolt asks/bids."""
+    opportunities = []
+
+    for sh in sh_events:
+        score = _name_similarity(cv_event.name, sh.name)
+        if score < MATCH_THRESHOLD:
+            continue
+        if not _dates_match(cv_event.event_date, sh.event_date):
+            continue
+        if not _cities_match(cv_event.city, sh.city):
+            continue
+        if sh.min_price is None:
+            continue
+
+        opp = ArbitrageOpportunity(
+            crowdvolt_event=cv_event,
+            source_platform="StubHub",
+            source_price=sh.min_price,
+            source_url=sh.url,
+            crowdvolt_ask=cv_event.min_ask,
+            crowdvolt_bid=cv_event.max_bid,
+            profit_vs_ask=None,
+            profit_vs_bid=None,
+        )
+
+        if cv_event.min_ask is not None:
+            opp.profit_vs_ask = cv_event.min_ask - sh.min_price
+
+        if cv_event.max_bid is not None:
+            opp.profit_vs_bid = cv_event.max_bid - sh.min_price
+
+        opportunities.append(opp)
+
+    return opportunities
+
+
+def match_vividseats(
+    cv_event: CrowdVoltEvent,
+    vs_events: list[VividSeatsEvent],
+) -> list[ArbitrageOpportunity]:
+    """Find VividSeats listings cheaper than CrowdVolt asks/bids."""
+    opportunities = []
+
+    for vs in vs_events:
+        score = _name_similarity(cv_event.name, vs.name)
+        if score < MATCH_THRESHOLD:
+            continue
+        if not _dates_match(cv_event.event_date, vs.event_date):
+            continue
+        if not _cities_match(cv_event.city, vs.city):
+            continue
+        if vs.min_price is None:
+            continue
+
+        opp = ArbitrageOpportunity(
+            crowdvolt_event=cv_event,
+            source_platform="VividSeats",
+            source_price=vs.min_price,
+            source_url=vs.url,
+            crowdvolt_ask=cv_event.min_ask,
+            crowdvolt_bid=cv_event.max_bid,
+            profit_vs_ask=None,
+            profit_vs_bid=None,
+        )
+
+        if cv_event.min_ask is not None:
+            opp.profit_vs_ask = cv_event.min_ask - vs.min_price
+
+        if cv_event.max_bid is not None:
+            opp.profit_vs_bid = cv_event.max_bid - vs.min_price
 
         opportunities.append(opp)
 

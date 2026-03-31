@@ -1,4 +1,4 @@
-"""Ticket arbitrage scanner — CrowdVolt vs SeatGeek + TickPick.
+"""Ticket arbitrage scanner — CrowdVolt vs SeatGeek + TickPick + StubHub + VividSeats.
 
 Usage:
     python main.py              # run once
@@ -16,7 +16,9 @@ import crowdvolt
 import matcher
 import notifier
 import seatgeek
+import stubhub
 import tickpick
+import vividseats
 
 
 def scan_once() -> int:
@@ -56,6 +58,8 @@ def scan_once() -> int:
 
         event_matched = False
 
+        # --- HTTP-based sources (fast) ---
+
         # Search SeatGeek
         try:
             sg_results = seatgeek.search_events(query, date_str)
@@ -82,6 +86,36 @@ def scan_once() -> int:
                 all_opportunities.extend(tp_opps)
         except Exception as e:
             print(f"  [TickPick] Error: {e}")
+            errors += 1
+
+        # --- Playwright-based sources (slower, headless browser) ---
+
+        # Search StubHub
+        try:
+            sh_results = stubhub.search_events(query, date_str)
+            if sh_results:
+                sh_opps = matcher.match_stubhub(cv_event, sh_results)
+                if sh_opps:
+                    event_matched = True
+                for opp in sh_opps:
+                    _log_opportunity(opp)
+                all_opportunities.extend(sh_opps)
+        except Exception as e:
+            print(f"  [StubHub] Error: {e}")
+            errors += 1
+
+        # Search VividSeats
+        try:
+            vs_results = vividseats.search_events(query, date_str)
+            if vs_results:
+                vs_opps = matcher.match_vividseats(cv_event, vs_results)
+                if vs_opps:
+                    event_matched = True
+                for opp in vs_opps:
+                    _log_opportunity(opp)
+                all_opportunities.extend(vs_opps)
+        except Exception as e:
+            print(f"  [VividSeats] Error: {e}")
             errors += 1
 
         if not event_matched:
@@ -181,10 +215,26 @@ def test_single():
     for tp in tp_results[:5]:
         print(f"  {tp.name} — ${tp.low_price}-${tp.high_price} at {tp.venue}")
 
+    # StubHub
+    print(f"\n[Test] Searching StubHub for '{query}'...")
+    sh_results = stubhub.search_events(query)
+    print(f"[Test] StubHub returned {len(sh_results)} results")
+    for sh in sh_results[:5]:
+        print(f"  {sh.name} — ${sh.min_price} at {sh.venue}")
+
+    # VividSeats
+    print(f"\n[Test] Searching VividSeats for '{query}'...")
+    vs_results = vividseats.search_events(query)
+    print(f"[Test] VividSeats returned {len(vs_results)} results")
+    for vs in vs_results[:5]:
+        print(f"  {vs.name} — ${vs.min_price} at {vs.venue}")
+
     # Check matches
     sg_opps = matcher.match_seatgeek(event, sg_results)
     tp_opps = matcher.match_tickpick(event, tp_results)
-    all_opps = sg_opps + tp_opps
+    sh_opps = matcher.match_stubhub(event, sh_results)
+    vs_opps = matcher.match_vividseats(event, vs_results)
+    all_opps = sg_opps + tp_opps + sh_opps + vs_opps
 
     print(f"\n[Test] {len(all_opps)} potential matches found")
     for opp in all_opps:
@@ -208,7 +258,7 @@ def main():
     args = parser.parse_args()
 
     # TickPick requires no API key, so we can always run.
-    # SeatGeek is an optional addition.
+    # SeatGeek is an optional addition. StubHub/VividSeats use Playwright.
     if not config.DISCORD_WEBHOOK_URL:
         print("ERROR: Set DISCORD_WEBHOOK_URL")
         sys.exit(1)
