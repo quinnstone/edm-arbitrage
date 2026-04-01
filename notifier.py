@@ -6,60 +6,62 @@ import config
 from matcher import ArbitrageOpportunity
 
 
-def _format_opportunity(opp: ArbitrageOpportunity) -> dict:
-    """Format an arbitrage opportunity as a Discord embed."""
-    cv = opp.crowdvolt_event
+def _format_opportunity(opps: list[ArbitrageOpportunity]) -> dict:
+    """Format a consolidated arbitrage alert for one CrowdVolt event.
 
-    margin = (opp.profit_vs_bid / opp.source_price) * 100
-    color = 0x00FF00  # green — all alerts require a waiting buyer
+    Takes all platform opportunities for a single event and renders
+    one embed showing prices across platforms, the best arb, and links.
+    """
+    # Only include opportunities that have a bid to sell to
+    opps = [o for o in opps if o.profit_vs_bid is not None]
+    if not opps:
+        return None
+
+    # Sort cheapest first
+    opps = sorted(opps, key=lambda o: o.source_price)
+    best = opps[0]
+    cv = best.crowdvolt_event
+
+    margin = (best.profit_vs_bid / best.source_price) * 100
+
+    # Price list across platforms
+    price_lines = []
+    for opp in opps:
+        label = opp.source_platform
+        price_str = f"${opp.source_price:.0f}"
+        if opp.fees_estimated:
+            price_str += " (est. w/ fees)"
+        price_lines.append(f"**{label}** — {price_str}")
 
     fields = [
         {
-            "name": "Buy On",
-            "value": f"**{opp.source_platform}** — **${opp.source_price:.0f}**",
+            "name": "Prices",
+            "value": "\n".join(price_lines),
             "inline": True,
         },
         {
-            "name": "Sell To (Waiting Buyer)",
-            "value": f"**${opp.crowdvolt_bid:.0f}** on CrowdVolt",
+            "name": "Highest CrowdVolt Offer",
+            "value": f"**${best.crowdvolt_bid:.0f}**",
             "inline": True,
         },
         {
-            "name": "Profit",
-            "value": f"**+${opp.profit_vs_bid:.0f}** ({margin:.1f}%)",
-            "inline": True,
+            "name": "Best Arbitrage",
+            "value": (
+                f"Buy on **{best.source_platform}** (${best.source_price:.0f})"
+                f" → Sell on **CrowdVolt** (${best.crowdvolt_bid:.0f})\n"
+                f"**+${best.profit_vs_bid:.0f}** ({margin:.1f}%)"
+            ),
+            "inline": False,
         },
     ]
 
-    if opp.crowdvolt_ask is not None:
-        fields.append({
-            "name": "Lowest Seller on CrowdVolt",
-            "value": f"${opp.crowdvolt_ask:.0f}",
-            "inline": True,
-        })
-
-    # People looking to buy (bids)
-    if cv.bids:
-        bid_lines = [f"• {b.user}: ${b.price:.0f} x{b.qty} ({b.ticket_type})" for b in cv.bids[:5]]
-        fields.append({
-            "name": f"Buyers Waiting ({len(cv.bids)})",
-            "value": "\n".join(bid_lines),
-            "inline": False,
-        })
-
-    # People selling (asks)
-    if cv.asks:
-        ask_lines = [f"• {a.user}: ${a.price:.0f} x{a.qty} ({a.ticket_type})" for a in cv.asks[:5]]
-        fields.append({
-            "name": f"Sellers Listed ({len(cv.asks)})",
-            "value": "\n".join(ask_lines),
-            "inline": False,
-        })
-
     # Links
+    link_parts = [f"[CrowdVolt]({cv.url})"]
+    for opp in opps:
+        link_parts.append(f"[{opp.source_platform}]({opp.source_url})")
     fields.append({
         "name": "Links",
-        "value": f"[CrowdVolt]({cv.url}) | [{opp.source_platform}]({opp.source_url})",
+        "value": " | ".join(link_parts),
         "inline": False,
     })
 
@@ -68,14 +70,16 @@ def _format_opportunity(opp: ArbitrageOpportunity) -> dict:
     return {
         "title": f"🎫 {cv.name}",
         "description": f"{cv.venue} — {cv.city} — {date_str}",
-        "color": color,
+        "color": 0x00FF00,
         "fields": fields,
     }
 
 
-def send_alert(opp: ArbitrageOpportunity) -> bool:
-    """Send a single arbitrage alert to Discord. Returns True on success."""
-    embed = _format_opportunity(opp)
+def send_alert(opps: list[ArbitrageOpportunity]) -> bool:
+    """Send a consolidated arbitrage alert for one event. Returns True on success."""
+    embed = _format_opportunity(opps)
+    if embed is None:
+        return False
 
     payload = {
         "username": "Ticket Arb",

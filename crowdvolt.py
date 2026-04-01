@@ -117,15 +117,44 @@ def _extract_book_json(html: str) -> Optional[dict]:
 
 
 def _extract_event_metadata(html: str) -> dict:
-    """Extract event-level metadata from the page HTML."""
-    # Unescape for searching
-    unescaped = html.replace('\\"', '"')
+    """Extract event-level metadata from the page HTML.
 
+    Prefers the JSON-LD MusicEvent block for name/date, then falls back
+    to the Next.js embedded data for venue/area_name/doors_open_time.
+    """
+    unescaped = html.replace('\\"', '"')
     meta = {}
-    for field_name in ["name", "venue", "area_name", "doors_open_time"]:
+
+    # Try JSON-LD first — reliable for name and date
+    ld_match = re.search(
+        r'<script type="application/ld\+json">(.*?)</script>',
+        html, re.DOTALL,
+    )
+    if ld_match:
+        try:
+            ld = json.loads(ld_match.group(1))
+            if ld.get("@type") in ("MusicEvent", "Event"):
+                meta["name"] = ld.get("name", "")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Extract venue, area_name, doors_open_time from the embedded Next.js data.
+    # These fields are unique to the event payload (unlike "name" which also
+    # appears in HTML meta tags), so first-match is safe.
+    for field_name in ["venue", "area_name", "doors_open_time"]:
         match = re.search(f'"{field_name}":"([^"]+)"', unescaped)
         if match:
             meta[field_name] = match.group(1)
+
+    # Fallback: if JSON-LD didn't give us a name, search near doors_open_time
+    # where the event payload lives (avoids meta tag false positives).
+    if not meta.get("name") and "doors_open_time" in meta:
+        dt_idx = unescaped.find('"doors_open_time"')
+        if dt_idx > 0:
+            region = unescaped[max(0, dt_idx - 2000):dt_idx]
+            name_match = re.search(r'"name":"([^"]+)"', region)
+            if name_match:
+                meta["name"] = name_match.group(1)
 
     return meta
 

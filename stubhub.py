@@ -2,8 +2,11 @@
 
 StubHub renders pricing via JavaScript, so we use a headless browser
 to load the search results page and extract event data from the DOM.
+Prices are only available on individual event pages, not in search results,
+so we navigate to each candidate event page to extract pricing from JSON-LD.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,35 +26,21 @@ class StubHubEvent:
     event_date: Optional[datetime]
     min_price: Optional[float]
     url: str
-
-
-def _launch_browser(pw):
-    """Launch a headless Chromium with stealth-ish settings."""
-    return pw.chromium.launch(headless=True)
-
-
-def _build_search_url(query: str, date_str: Optional[str] = None) -> str:
-    """Build a StubHub search URL."""
-    base = "https://www.stubhub.com/find/s/"
-    params = f"?q={query.replace(' ', '+')}"
-    if date_str:
-        params += f"&date={date_str}"
-    return base + params
+    price_is_all_in: bool = False  # True when price includes fees
 
 
 def search_events(query: str, date_str: Optional[str] = None) -> list[StubHubEvent]:
     """Search StubHub for events matching a query using Playwright.
 
-    Args:
-        query: Artist or event name to search for.
-        date_str: Optional date string (YYYY-MM-DD) to filter results.
+    Finds matching events on the search page, then navigates to event
+    pages to extract actual pricing from JSON-LD.
     """
     events = []
-    url = _build_search_url(query, date_str)
+    url = f"https://www.stubhub.com/search?q={query.replace(' ', '+')}"
 
     try:
         with sync_playwright() as pw:
-            browser = _launch_browser(pw)
+            browser = pw.chromium.launch(headless=True)
             try:
                 page = browser.new_page(
                     user_agent=(
@@ -64,49 +53,69 @@ def search_events(query: str, date_str: Optional[str] = None) -> list[StubHubEve
 
                 page.goto(url, wait_until="domcontentloaded", timeout=20000)
 
-                # StubHub may serve a JS challenge. Wait for real content.
                 try:
                     page.wait_for_selector(
-                        "#__NEXT_DATA__, [data-testid='primaryGridListing'], a[href*='/event/']",
+                        "a[href*='/event/']",
                         timeout=15000,
                     )
                 except PwTimeout:
                     print("  [StubHub] No results rendered in time")
                     return []
 
-                # Try JSON extraction first, fall back to DOM parsing
-                events = _extract_from_json(page)
-                if not events:
-                    events = _extract_from_search(page)
+                # Parse event cards from search results (no prices here)
+                candidates = _parse_search_cards(page)
+                if not candidates:
+                    return []
+
+                # Filter by date before navigating to event pages
+                if date_str:
+                    try:
+                        target_date = dateparser.parse(date_str).date()
+                        candidates = [
+                            c for c in candidates
+                            if c.event_date is None
+                            or abs((c.event_date.date() - target_date).days) <= 1
+                        ]
+                    except (ValueError, TypeError):
+                        pass
+
+                # Navigate to each candidate's event page to get pricing.
+                # Use a fresh page per event — StubHub throttles JS rendering
+                # on subsequent loads within the same page context.
+                # Limit to 3 to keep runtime reasonable.
+                for candidate in candidates[:3]:
+                    event_page = browser.new_page(
+                        user_agent=(
+                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/120.0.0.0 Safari/537.36"
+                        ),
+                        viewport={"width": 1280, "height": 800},
+                    )
+                    try:
+                        result = _fetch_event_price(event_page, candidate.url)
+                        if result is not None:
+                            candidate.min_price, candidate.price_is_all_in = result
+                            events.append(candidate)
+                    finally:
+                        event_page.close()
+
             finally:
                 browser.close()
     except Exception as e:
         print(f"  [StubHub] Playwright error: {e}")
         return []
 
-    # Filter by date if provided
-    if date_str and events:
-        try:
-            target_date = dateparser.parse(date_str).date()
-            events = [
-                e for e in events
-                if e.event_date is None
-                or abs((e.event_date.date() - target_date).days) <= 1
-            ]
-        except (ValueError, TypeError):
-            pass
-
     return events
 
 
-def _extract_from_search(page) -> list[StubHubEvent]:
-    """Extract event data from StubHub search results page."""
-    events = []
+def _parse_search_cards(page) -> list[StubHubEvent]:
+    """Parse event cards from StubHub search results.
 
-    # StubHub search results are typically in card/list format
-    # Try multiple selector strategies for resilience
-
-    # Strategy 1: Look for structured event links with pricing
+    Cards contain name, date, venue, and city but no prices.
+    Format: Month \\n Day \\n Weekday \\n Name \\n Time+Venue+City \\n "See tickets"
+    """
+    candidates = []
     cards = page.query_selector_all("a[href*='/event/']")
 
     seen_urls = set()
@@ -118,139 +127,106 @@ def _extract_from_search(page) -> list[StubHubEvent]:
 
             full_url = href if href.startswith("http") else f"https://www.stubhub.com{href}"
 
-            # Deduplicate
-            event_id = re.search(r"/event/(\d+)", href)
-            if event_id:
-                eid = event_id.group(1)
-                if eid in seen_urls:
-                    continue
-                seen_urls.add(eid)
+            # Strip query params for dedup
+            clean_url = full_url.split("?")[0]
+            if clean_url in seen_urls:
+                continue
+            seen_urls.add(clean_url)
 
-            # Get text content from the card
             text = card.inner_text().strip()
             if not text:
                 continue
 
-            # Parse the card text — StubHub cards typically show:
-            # Event Name \n Date \n Venue \n City, State \n From $XX
             lines = [l.strip() for l in text.split("\n") if l.strip()]
-            if len(lines) < 2:
+            # Expect: [month, day, weekday, name, venue_info, "See tickets"]
+            if len(lines) < 4:
                 continue
 
-            name = lines[0]
+            # Name is typically the 4th line (after month, day, weekday)
+            name = lines[3] if len(lines) > 3 else lines[0]
+
+            # Parse date from first lines (e.g., "Aug", "29", "Sat")
+            event_date = None
+            if len(lines) >= 3:
+                date_text = f"{lines[0]} {lines[1]}"
+                try:
+                    parsed = dateparser.parse(date_text, fuzzy=True)
+                    if parsed:
+                        # dateutil defaults to current year if not specified;
+                        # if the date is in the past, bump to next year
+                        if parsed.date() < datetime.now().date():
+                            parsed = parsed.replace(year=parsed.year + 1)
+                        event_date = parsed
+                except (ValueError, TypeError):
+                    pass
+
+            # Venue+city is usually the 5th line: "7:30 PMVenue NameCity, State"
             venue = ""
             city = ""
-            event_date = None
-            min_price = None
+            if len(lines) >= 5:
+                venue_line = lines[4]
+                # Strip leading time like "7:30 PM"
+                venue_line = re.sub(r'^\d{1,2}:\d{2}\s*[AP]M\s*', '', venue_line)
+                # Try to split on city pattern "City, State" at end
+                city_match = re.search(r'([A-Z][a-zA-Z\s]+,\s*[A-Z]{2}(?:,\s*\w+)?)\s*$', venue_line)
+                if city_match:
+                    city = city_match.group(1)
+                    venue = venue_line[:city_match.start()].strip()
+                else:
+                    venue = venue_line
 
-            for line in lines[1:]:
-                # Price detection
-                price_match = re.search(r'\$(\d+(?:,\d{3})*(?:\.\d{2})?)', line)
-                if price_match and min_price is None:
-                    min_price = float(price_match.group(1).replace(",", ""))
-                    continue
-
-                # Date detection
-                if event_date is None:
-                    try:
-                        parsed = dateparser.parse(line, fuzzy=True)
-                        if parsed and parsed.year >= 2025:
-                            event_date = parsed
-                            continue
-                    except (ValueError, TypeError):
-                        pass
-
-                # Venue/city — usually contains a comma for "City, State"
-                if not venue and not any(c in line.lower() for c in ["from", "ticket", "$"]):
-                    if "," in line:
-                        city = line
-                    else:
-                        venue = line
-
-            if name and min_price is not None:
-                events.append(StubHubEvent(
-                    name=name,
-                    venue=venue,
-                    city=city,
-                    event_date=event_date,
-                    min_price=min_price,
-                    url=full_url,
-                ))
+            candidates.append(StubHubEvent(
+                name=name,
+                venue=venue,
+                city=city,
+                event_date=event_date,
+                min_price=None,
+                url=clean_url,
+            ))
         except Exception:
             continue
 
-    return events
+    return candidates
 
 
-def _extract_from_json(page) -> list[StubHubEvent]:
-    """Fallback: extract event data from embedded JSON in the page."""
-    events = []
-
+def _fetch_event_price(page, event_url: str) -> Optional[tuple[float, bool]]:
+    """Navigate to a StubHub event page and extract the lowest all-in price."""
     try:
-        # Check for __NEXT_DATA__ or similar embedded JSON
-        json_content = page.evaluate("""() => {
-            const el = document.querySelector('#__NEXT_DATA__');
-            if (el) return el.textContent;
+        page.goto(event_url, wait_until="domcontentloaded", timeout=15000)
 
-            // Try window state
-            if (window.__data) return JSON.stringify(window.__data);
-            if (window.__NEXT_DATA__) return JSON.stringify(window.__NEXT_DATA__);
+        # Wait for ticket listing prices to render (JS-rendered, takes a moment)
+        try:
+            page.wait_for_function(
+                "() => document.body.innerText.includes('incl. fees')",
+                timeout=10000,
+            )
+        except PwTimeout:
+            pass
 
-            return null;
+        # Prefer the "incl. fees" price from the page — it's the real all-in
+        body = page.inner_text("body")
+        match = re.search(r'\$(\d+(?:,\d{3})*)\s*incl\.\s*fees', body)
+        if match:
+            return float(match.group(1).replace(",", "")), True
+
+        # Fallback: JSON-LD lowPrice (base price before fees)
+        ld_blocks = page.evaluate("""() => {
+            const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+            return Array.from(scripts).map(s => s.textContent);
         }""")
 
-        if json_content:
-            import json
-            data = json.loads(json_content)
-            events = _parse_next_data(data)
-    except Exception:
-        pass
+        for block in (ld_blocks or []):
+            try:
+                data = json.loads(block)
+                if data.get("@type") in ("MusicEvent", "Event", "Festival"):
+                    offers = data.get("offers", {})
+                    low = offers.get("lowPrice")
+                    if low is not None:
+                        return float(low), False
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
 
-    return events
+    except Exception as e:
+        print(f"  [StubHub] Failed to fetch event page price: {e}")
 
-
-def _parse_next_data(data: dict) -> list[StubHubEvent]:
-    """Recursively search Next.js data for event listings with pricing."""
-    events = []
-
-    def _search(obj, depth=0):
-        if depth > 10:
-            return
-        if isinstance(obj, dict):
-            # Look for event-like objects with pricing
-            if "minPrice" in obj or "minListPrice" in obj or "priceRange" in obj:
-                name = obj.get("name", obj.get("title", obj.get("eventName", "")))
-                price = obj.get("minPrice", obj.get("minListPrice"))
-                if isinstance(price, dict):
-                    price = price.get("amount")
-                if name and price:
-                    dt = None
-                    date_val = obj.get("eventDate", obj.get("date",
-                               obj.get("startDate", "")))
-                    if date_val:
-                        try:
-                            dt = dateparser.parse(str(date_val))
-                        except (ValueError, TypeError):
-                            pass
-
-                    venue_val = obj.get("venue", obj.get("venueName", ""))
-                    if isinstance(venue_val, dict):
-                        venue_val = venue_val.get("name", "")
-
-                    events.append(StubHubEvent(
-                        name=str(name),
-                        venue=str(venue_val),
-                        city=obj.get("city", ""),
-                        event_date=dt,
-                        min_price=float(price),
-                        url=obj.get("url", ""),
-                    ))
-                    return
-            for v in obj.values():
-                _search(v, depth + 1)
-        elif isinstance(obj, list):
-            for item in obj:
-                _search(item, depth + 1)
-
-    _search(data)
-    return events
+    return None

@@ -21,6 +21,16 @@ MIN_PROFIT_MARGIN_PCT = 5
 # CrowdVolt base URL
 CROWDVOLT_BASE_URL = "https://www.crowdvolt.com"
 
+# Estimated buyer fee percentages per platform (decimal).
+# Applied to base prices to approximate all-in cost.
+# TickPick advertises no buyer fees; others charge 20-30%.
+PLATFORM_FEES = {
+    "SeatGeek": 0.22,
+    "StubHub": 0.45,
+    "VividSeats": 0.28,
+    "TickPick": 0.0,
+}
+
 # Request settings
 REQUEST_TIMEOUT = 15
 REQUEST_DELAY_SECONDS = 1.5  # delay between CrowdVolt page fetches to be polite

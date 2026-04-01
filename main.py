@@ -136,17 +136,23 @@ def scan_once() -> int:
     print(f"\n[Scan] {len(real_opps)} opportunities passed filters")
     print(f"[Scan] {match_failures} events had no cross-platform match")
 
+    # Group opportunities by CrowdVolt event so we send one alert per event
+    by_event: dict[str, list] = {}
     for opp in real_opps:
-        notifier.send_alert(opp)
+        slug = opp.crowdvolt_event.slug
+        by_event.setdefault(slug, []).append(opp)
+
+    for slug, opps in by_event.items():
+        notifier.send_alert(opps)
         time.sleep(1)  # respect Discord rate limits
 
     notifier.send_summary(
-        len(cv_events), len(real_opps), errors,
+        len(cv_events), len(by_event), errors,
         events_with_bids, match_failures,
     )
 
-    print(f"[Scan] Done — {len(real_opps)} alerts sent")
-    return len(real_opps)
+    print(f"[Scan] Done — {len(by_event)} alerts sent")
+    return len(by_event)
 
 
 def _log_opportunity(opp):
@@ -250,7 +256,7 @@ def test_single():
     real = _filter_opportunities(all_opps)
     if real:
         print(f"\n[Test] Sending test alert for best opportunity...")
-        notifier.send_alert(real[0])
+        notifier.send_alert(real)
         print("[Test] Alert sent to Discord!")
     else:
         print("\n[Test] No opportunities passed filters — sending test summary")
