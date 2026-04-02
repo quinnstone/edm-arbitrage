@@ -9,6 +9,13 @@ SEATGEEK_CLIENT_ID = os.getenv("SEATGEEK_CLIENT_ID", "")
 # VividSeats — placeholder for future use (requires affiliate approval)
 VIVIDSEATS_API_KEY = os.getenv("VIVIDSEATS_API_KEY", "")
 
+# GroupMe — scan group chat for ticket buy requests
+GROUPME_TOKEN = os.getenv("GROUPME_TOKEN", "")
+GROUPME_GROUP_ID = os.getenv("GROUPME_GROUP_ID", "")
+
+# GroupMe — how far back to scan for buy requests (rolling window)
+GROUPME_LOOKBACK_DAYS = 7
+
 # Scrape interval in minutes
 SCAN_INTERVAL_MINUTES = 30
 

@@ -13,6 +13,7 @@ from datetime import datetime
 
 import config
 import crowdvolt
+import groupme
 import matcher
 import notifier
 import seatgeek
@@ -153,13 +154,43 @@ def scan_once() -> int:
         notifier.send_alert(opps)
         time.sleep(1)  # respect Discord rate limits
 
+    # Step 4: Scan GroupMe for buy requests (uses ALL events including DICE)
+    gm_request_count = 0
+    gm_match_count = 0
+    if config.GROUPME_TOKEN and config.GROUPME_GROUP_ID:
+        print(f"\n[GroupMe] Scanning for buy requests...")
+        gm_messages = groupme.fetch_recent_messages(
+            minutes=config.GROUPME_LOOKBACK_DAYS * 24 * 60,
+        )
+        gm_requests = groupme.parse_buy_requests(gm_messages)
+        gm_request_count = len(gm_requests)
+        print(f"[GroupMe] {gm_request_count} buy requests in "
+              f"{len(gm_messages)} messages")
+
+        if gm_requests:
+            gm_matches = groupme.match_demand(gm_requests, cv_events)
+            gm_match_count = len(gm_matches)
+            print(f"[GroupMe] {gm_match_count} matched to CrowdVolt events")
+
+            for gm_match in gm_matches:
+                cv = gm_match.crowdvolt_event
+                users = ", ".join(r.user for r in gm_match.buy_requests)
+                print(f"  [GroupMe] {cv.name} [{cv.ticket_platform}] ← {users}")
+                notifier.send_groupme_alert(gm_match)
+                time.sleep(1)
+    else:
+        print(f"\n[GroupMe] Skipped — no token configured")
+
     notifier.send_summary(
         len(cv_events), len(by_event), errors,
         events_with_bids, match_failures,
         dice_filtered=len(dice_events),
+        groupme_requests=gm_request_count,
+        groupme_matches=gm_match_count,
     )
 
-    print(f"[Scan] Done — {len(by_event)} alerts sent")
+    print(f"[Scan] Done — {len(by_event)} arbitrage alerts, "
+          f"{gm_match_count} GroupMe matches")
     return len(by_event)
 
 
