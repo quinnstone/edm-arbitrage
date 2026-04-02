@@ -40,6 +40,7 @@ class CrowdVoltEvent:
     venue: str
     city: str
     event_date: Optional[datetime] = None
+    ticket_platform: str = ""  # e.g. "DICE", "AXS", "Ticketmaster"
     ticket_types: list[dict] = field(default_factory=list)
     bids: list[Listing] = field(default_factory=list)  # buy side
     asks: list[Listing] = field(default_factory=list)  # sell side
@@ -138,10 +139,12 @@ def _extract_event_metadata(html: str) -> dict:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # Extract venue, area_name, doors_open_time from the embedded Next.js data.
-    # These fields are unique to the event payload (unlike "name" which also
-    # appears in HTML meta tags), so first-match is safe.
-    for field_name in ["venue", "area_name", "doors_open_time"]:
+    # Extract venue, area_name, doors_open_time, and app_name from the
+    # embedded Next.js data.  These fields are unique to the event payload
+    # (unlike "name" which also appears in HTML meta tags), so first-match
+    # is safe.  app_name tells us which ticketing platform issued the
+    # tickets (e.g. "DICE", "AXS", "Ticketmaster").
+    for field_name in ["venue", "area_name", "doors_open_time", "app_name"]:
         match = re.search(f'"{field_name}":"([^"]+)"', unescaped)
         if match:
             meta[field_name] = match.group(1)
@@ -201,6 +204,7 @@ def fetch_event(slug: str) -> Optional[CrowdVoltEvent]:
         name=meta["name"],
         venue=meta.get("venue", ""),
         city=meta.get("area_name", ""),
+        ticket_platform=meta.get("app_name", ""),
         url=url,
     )
 
@@ -270,7 +274,8 @@ def fetch_all_events() -> list[CrowdVoltEvent]:
                 if has_market:
                     with lock:
                         events.append(event)
-                    print(f"  [{done_count}/{len(slugs)}] {event.name} — active")
+                    platform_tag = f" [{event.ticket_platform}]" if event.ticket_platform else ""
+                    print(f"  [{done_count}/{len(slugs)}] {event.name}{platform_tag} — active")
             # Only log every 50th skip to reduce noise
             elif done_count % 50 == 0:
                 print(f"  [{done_count}/{len(slugs)}] scanning...")

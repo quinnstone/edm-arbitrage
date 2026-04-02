@@ -31,8 +31,15 @@ def scan_once() -> int:
     cv_events = crowdvolt.fetch_all_events()
     if not cv_events:
         print("[Scan] No CrowdVolt events with active listings — nothing to do")
-        notifier.send_summary(0, 0, 0, 0, 0)
+        notifier.send_summary(0, 0, 0, 0, 0, dice_filtered=0)
         return 0
+
+    # Filter out DICE-only events — tickets require in-app transfer
+    # and can't be fulfilled with third-party QR codes from StubHub, etc.
+    dice_events = [e for e in cv_events if e.ticket_platform.upper() == "DICE"]
+    cv_events = [e for e in cv_events if e.ticket_platform.upper() != "DICE"]
+    print(f"[Scan] Filtered out {len(dice_events)} DICE-only events "
+          f"({len(cv_events)} remaining)")
 
     # Track bid availability
     events_with_bids = sum(1 for e in cv_events if e.max_bid is not None)
@@ -149,6 +156,7 @@ def scan_once() -> int:
     notifier.send_summary(
         len(cv_events), len(by_event), errors,
         events_with_bids, match_failures,
+        dice_filtered=len(dice_events),
     )
 
     print(f"[Scan] Done — {len(by_event)} alerts sent")
@@ -199,6 +207,7 @@ def test_single():
         return
 
     print(f"[Test] Event: {event.name}")
+    print(f"[Test] Platform: {event.ticket_platform or 'Unknown'}")
     print(f"[Test] Venue: {event.venue} — {event.city}")
     print(f"[Test] Date: {event.event_date}")
     print(f"[Test] Sellers: {len(event.asks)} (lowest: ${event.min_ask})")

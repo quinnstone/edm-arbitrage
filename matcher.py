@@ -48,7 +48,7 @@ def extract_artist_name(event_name: str) -> str:
         " nyc", " la ",
     ]:
         idx = name.find(noise)
-        if idx > 2:  # keep at least a few chars
+        if idx >= 5:  # keep enough chars for a meaningful query
             name = name[:idx]
     return name.strip()
 
@@ -86,11 +86,13 @@ def _name_similarity(name1: str, name2: str) -> int:
     """Score 0-100 for how similar two event/artist names are."""
     a = extract_artist_name(name1)
     b = extract_artist_name(name2)
-    return max(
-        fuzz.ratio(a, b),
-        fuzz.partial_ratio(a, b),
-        fuzz.token_sort_ratio(a, b),
-    )
+    scores = [fuzz.ratio(a, b), fuzz.token_sort_ratio(a, b)]
+    # partial_ratio inflates scores when one name is very short
+    # (e.g. "wire" scores 100 against "wireless") — only trust it
+    # when the shorter name is long enough to be distinctive.
+    if min(len(a), len(b)) >= 6:
+        scores.append(fuzz.partial_ratio(a, b))
+    return max(scores)
 
 
 MATCH_THRESHOLD = 70  # minimum fuzzy score to consider a match

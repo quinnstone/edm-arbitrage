@@ -66,10 +66,11 @@ def _format_opportunity(opps: list[ArbitrageOpportunity]) -> dict:
     })
 
     date_str = cv.event_date.strftime("%b %d, %Y") if cv.event_date else "TBD"
+    platform_str = f" · via {cv.ticket_platform}" if cv.ticket_platform else ""
 
     return {
         "title": f"🎫 {cv.name}",
-        "description": f"{cv.venue} — {cv.city} — {date_str}",
+        "description": f"{cv.venue} — {cv.city} — {date_str}{platform_str}",
         "color": 0x00FF00,
         "fields": fields,
     }
@@ -105,6 +106,7 @@ def send_summary(
     errors: int,
     events_with_bids: int = 0,
     match_failures: int = 0,
+    dice_filtered: int = 0,
 ) -> bool:
     """Send a scan summary to Discord."""
     asks_only = total_events - events_with_bids
@@ -129,6 +131,7 @@ def send_summary(
             "title": "Scan Complete",
             "description": (
                 f"**{total_events}** CrowdVolt events scanned\n"
+                f"**{dice_filtered}** DICE-only events filtered out\n"
                 f"**{events_with_bids}** with waiting buyers · "
                 f"**{asks_only}** sellers only\n"
                 f"**{opportunities}** arbitrage opportunities found\n"
