@@ -315,7 +315,13 @@ def match_vividseats(
         if vs.min_price is None:
             continue
 
-        all_in = vs.min_price * (1 + fee_rate)
+        # Use actual all-in price when available, otherwise estimate fees
+        if vs.price_is_all_in:
+            all_in = vs.min_price
+            estimated = False
+        else:
+            all_in = vs.min_price * (1 + fee_rate)
+            estimated = True
 
         opp = ArbitrageOpportunity(
             crowdvolt_event=cv_event,
@@ -326,7 +332,7 @@ def match_vividseats(
             crowdvolt_bid=cv_event.max_bid,
             profit_vs_ask=None,
             profit_vs_bid=None,
-            fees_estimated=fee_rate > 0,
+            fees_estimated=estimated,
         )
 
         if cv_event.min_ask is not None:

@@ -18,8 +18,20 @@ _BUY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Patterns indicating someone is selling — skip these.
+# Patterns indicating someone is selling — skip these (from buy-side),
+# also used to detect sell intent in sell-side parsing.
 _SELL_RE = re.compile(r"\b(?:selling|sell|wts|for sale)\b", re.IGNORECASE)
+
+# Broader sell-intent patterns that capture contextual selling.
+# These handle cases where the event name appears *before* the sell keyword,
+# e.g. "Bought zedds dead... Looking to sell at face value"
+_SELL_CONTEXT_RE = re.compile(
+    r"\b(?:looking to sell|trying to sell|want to sell|need to sell|"
+    r"have .{3,40} (?:for sale|to sell)|"
+    r"got .{3,40} (?:for sale|to sell)|"
+    r"bought .{3,40}(?:looking to sell|want to sell|need to sell|for sale))\b",
+    re.IGNORECASE,
+)
 
 # Words to strip from the extracted query (not part of the event name).
 _NOISE_WORDS = [
@@ -42,8 +54,25 @@ class BuyRequest:
 
 
 @dataclass
+class SellListing:
+    user: str
+    text: str
+    event_query: str
+    price: Optional[float]  # None if seller didn't list a price
+    qty: int
+    message_id: str
+    created_at: int  # unix timestamp
+
+
+@dataclass
 class GroupMeMatch:
     buy_requests: list[BuyRequest]
+    crowdvolt_event: CrowdVoltEvent
+
+
+@dataclass
+class GroupMeSellMatch:
+    sell_listings: list[SellListing]
     crowdvolt_event: CrowdVoltEvent
 
 
@@ -145,6 +174,168 @@ def _extract_buy_query(text: str) -> Optional[str]:
     return query
 
 
+def _extract_sell_listing(text: str) -> Optional[tuple[str, Optional[float], int]]:
+    """Return (event_query, price, qty) if *text* is a sell post, else None.
+
+    Handles two patterns:
+    1. Standard: "Selling 2 Adam Ten for $90" — event name after sell keyword
+    2. Contextual: "Bought zedds dead... looking to sell at face" — event
+       name appears *before* the sell keyword, extracted from the full message
+    """
+    lower = text.lower().strip()
+
+    # Check for sell intent (standard pattern first)
+    sell_match = _SELL_RE.search(lower)
+    context_match = _SELL_CONTEXT_RE.search(lower)
+
+    if not sell_match and not context_match:
+        return None
+
+    # If a buy word appears *before* the sell intent, it's a buy post
+    # e.g. "ISO Adam Ten" with "sell" later is buy-first intent
+    if sell_match:
+        buy_match = _BUY_RE.search(lower)
+        if buy_match and buy_match.start() < sell_match.start():
+            return None
+
+    # Decide where the event name lives: after sell keyword, or in the
+    # full message context when the sell phrase leaves nothing useful
+    query = ""
+    if sell_match:
+        # Standard: take everything after the sell keyword
+        query = lower[sell_match.end():].strip()
+
+    # Extract price from the full message (before cleaning the query)
+    price = None
+    price_match = re.search(r'\$(\d+(?:,\d{3})*(?:\.\d{2})?)', lower)
+    if price_match:
+        price = float(price_match.group(1).replace(",", ""))
+    else:
+        # Try "90$" or "for 90"
+        price_match2 = re.search(r'(?:for\s+)?(\d+)\s*\$', lower)
+        if price_match2:
+            price = float(price_match2.group(1))
+
+    # Extract quantity from after sell keyword
+    qty = 1
+    qty_match = re.match(r"^(\d+)\s*x?\s+", query)
+    if qty_match:
+        qty = int(qty_match.group(1))
+        query = query[qty_match.end():]
+    else:
+        word_qtys = {"one": 1, "two": 2, "three": 3, "four": 4}
+        for word, n in word_qtys.items():
+            if query.startswith(word + " "):
+                qty = n
+                query = query[len(word):].strip()
+                break
+
+    # Remove price strings from the query
+    query = re.sub(r'\$\d+(?:,\d{3})*(?:\.\d{2})?', '', query)
+    query = re.sub(r'\d+\s*\$', '', query)
+
+    # Strip noise words
+    sell_noise = _NOISE_WORDS + ["each", "obo", "or best offer", "face value",
+                                  "face", "below face", "above face", "per",
+                                  "text", "call", "dm me", "dm",
+                                  "another", "anyone need", "anyone want",
+                                  "lmk", "let me know", "hit me up",
+                                  "for", "at"]
+    for word in sell_noise:
+        query = re.sub(r"\b" + re.escape(word) + r"\b", "", query, flags=re.IGNORECASE)
+
+    # Strip phone numbers
+    query = re.sub(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b", "", query)
+
+    # Clean up
+    query = re.sub(r"\s+", " ", query).strip(" ?!.,;:-")
+
+    # If the after-keyword query is too short, try extracting the event
+    # name from the full message (contextual sell pattern).
+    # e.g. "Bought zedds dead bowl... looking to sell at face value"
+    if len(query) < 3:
+        query = _extract_event_from_context(lower)
+
+    if len(query) < 3:
+        return None
+
+    return (query, price, qty)
+
+
+def _extract_event_from_context(text: str) -> str:
+    """Extract an event name from a message where sell intent is contextual.
+
+    Handles patterns like:
+    - "Bought zedds dead bowl 7/18 forest hills thinking they were floor.
+       Looking to sell at face value"
+    - "Have 2 Chris Lake tickets, want to sell"
+    - "Got extra Solid Grooves for sale"
+
+    Strategy: strip sell-intent phrases, buy-context phrases, noise, and
+    return what's left as the event query.
+    """
+    # Remove sell-intent phrases
+    cleaned = re.sub(
+        r"\b(?:looking to sell|trying to sell|want to sell|need to sell|"
+        r"for sale|selling|sell|wts)\b",
+        " ", text, flags=re.IGNORECASE,
+    )
+    # Remove buy-context phrases (how they got the ticket)
+    cleaned = re.sub(
+        r"\b(?:bought|purchased|got|have|had)\b",
+        " ", cleaned, flags=re.IGNORECASE,
+    )
+    # Remove filler/reasoning
+    cleaned = re.sub(
+        r"\b(?:thinking they were|thought they were|thought it was|"
+        r"turns out|but|and|so|at face value|face value|face|"
+        r"below face|above face|obo|or best offer)\b",
+        " ", cleaned, flags=re.IGNORECASE,
+    )
+    # Remove dates like "7/18", "April 4", "Saturday"
+    cleaned = re.sub(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b", " ", cleaned)
+    cleaned = re.sub(
+        r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        " ", cleaned, flags=re.IGNORECASE,
+    )
+    # Remove prices
+    cleaned = re.sub(r'\$\d+(?:,\d{3})*(?:\.\d{2})?', '', cleaned)
+    # Remove phone numbers
+    cleaned = re.sub(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b", "", cleaned)
+    # Remove common noise
+    for word in _NOISE_WORDS:
+        cleaned = re.sub(r"\b" + re.escape(word) + r"\b", "", cleaned, flags=re.IGNORECASE)
+    # Remove seating words
+    cleaned = re.sub(
+        r"\b(?:floor|ga|general admission|pit|balcony|mezzanine|vip|section|row|seat)\b",
+        " ", cleaned, flags=re.IGNORECASE,
+    )
+
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ?!.,;:-")
+    # Strip leading quantity: "2 chris lake" → "chris lake"
+    cleaned = re.sub(r"^\d+\s*x?\s+", "", cleaned)
+    return cleaned
+
+
+def parse_sell_listings(messages: list[dict]) -> list[SellListing]:
+    """Extract sell listings from a list of GroupMe messages."""
+    out = []
+    for msg in messages:
+        result = _extract_sell_listing(msg.get("text", ""))
+        if result:
+            query, price, qty = result
+            out.append(SellListing(
+                user=msg.get("name", "Unknown"),
+                text=msg.get("text", ""),
+                event_query=query,
+                price=price,
+                qty=qty,
+                message_id=msg.get("id", ""),
+                created_at=msg.get("created_at", 0),
+            ))
+    return out
+
+
 def parse_buy_requests(messages: list[dict]) -> list[BuyRequest]:
     """Extract buy requests from a list of GroupMe messages."""
     out = []
@@ -193,6 +384,44 @@ def match_demand(
             else:
                 matches[slug] = GroupMeMatch(
                     buy_requests=[req],
+                    crowdvolt_event=best_event,
+                )
+
+    return list(matches.values())
+
+
+def match_supply(
+    sell_listings: list[SellListing],
+    cv_events: list[CrowdVoltEvent],
+) -> list[GroupMeSellMatch]:
+    """Match sell listings against CrowdVolt events with active bids.
+
+    Only considers events where someone on CrowdVolt is already offering
+    to buy — no bid means no guaranteed buyer, so no alert.
+
+    Returns one match per event, with all matching sell listings grouped.
+    """
+    events_with_bids = [e for e in cv_events if e.max_bid is not None]
+
+    matches: dict[str, GroupMeSellMatch] = {}  # keyed by event slug
+
+    for listing in sell_listings:
+        best_score = 0
+        best_event = None
+
+        for event in events_with_bids:
+            score = _name_similarity(listing.event_query, event.name)
+            if score > best_score and score >= MATCH_THRESHOLD:
+                best_score = score
+                best_event = event
+
+        if best_event:
+            slug = best_event.slug
+            if slug in matches:
+                matches[slug].sell_listings.append(listing)
+            else:
+                matches[slug] = GroupMeSellMatch(
+                    sell_listings=[listing],
                     crowdvolt_event=best_event,
                 )
 

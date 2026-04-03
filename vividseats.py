@@ -23,6 +23,7 @@ class VividSeatsEvent:
     event_date: Optional[datetime]
     min_price: Optional[float]
     url: str
+    price_is_all_in: bool = False  # True when min_price includes fees
 
 
 def search_events(query: str, date_str: Optional[str] = None) -> list[VividSeatsEvent]:
@@ -108,12 +109,17 @@ def _extract_next_data(page) -> list[VividSeatsEvent]:
                 # VividSeats uses "productions" or "events" arrays
                 has_name = "name" in obj or "title" in obj
                 has_price = any(k in obj for k in [
-                    "minPrice", "minListPrice", "price", "lowPrice",
+                    "minAipPrice", "minPrice", "minListPrice",
+                    "price", "lowPrice",
                 ])
                 if has_name and has_price:
                     name = obj.get("name", obj.get("title", ""))
-                    price = obj.get("minPrice", obj.get("minListPrice",
-                            obj.get("price", obj.get("lowPrice"))))
+                    # Prefer minAipPrice (all-in with fees) over base price
+                    aip = obj.get("minAipPrice")
+                    base = obj.get("minPrice", obj.get("minListPrice",
+                           obj.get("price", obj.get("lowPrice"))))
+                    price = aip or base
+                    is_all_in = aip is not None
                     if name and price:
                         venue_name = ""
                         city_name = ""
@@ -142,6 +148,7 @@ def _extract_next_data(page) -> list[VividSeatsEvent]:
                             event_date=event_date,
                             min_price=float(price),
                             url=event_url,
+                            price_is_all_in=is_all_in,
                         ))
                         return
                 for v in obj.values():
