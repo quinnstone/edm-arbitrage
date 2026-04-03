@@ -1,5 +1,6 @@
 """Match CrowdVolt events against SeatGeek, TickPick, StubHub, and VividSeats."""
 
+import unicodedata
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional
@@ -33,23 +34,53 @@ def _is_junk(name: str) -> bool:
     return any(kw in lower for kw in JUNK_KEYWORDS)
 
 
+def _strip_accents(text: str) -> str:
+    """Normalize accented characters to ASCII equivalents.
+
+    "rüfüs" → "rufus", "böhmer" → "bohmer", "naté" → "nate"
+    """
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
 def extract_artist_name(event_name: str) -> str:
     """Pull the core artist name from an event string.
 
     Strips common suffixes like venue info, date fragments, and festival qualifiers.
     Used both for fuzzy matching and as the search query for external platforms.
     """
-    # Remove common noise words for matching
-    name = event_name.lower()
+    name = _strip_accents(event_name.lower())
+
+    # Truncate at venue/location delimiters — keep everything before.
+    # The idx >= 5 guard prevents over-stripping short names like
+    # "Wire Festival" (idx=4) down to "wire".
     for noise in [
-        " at ", " @ ", " - ", " | ", " tickets", " concert",
-        " festival", " music", " live", " tour", " presents",
+        " at ", " @ ", " - ", " | ", " presents", " festival",
         " miami", " new york", " brooklyn", " chicago", " los angeles",
         " nyc", " la ",
     ]:
         idx = name.find(noise)
         if idx >= 5:  # keep enough chars for a meaningful query
             name = name[:idx]
+
+    # Strip trailing qualifiers that don't identify the artist.
+    # Safe for short names because we only remove known non-artist words.
+    for suffix in [
+        " tickets", " concert", " music", " live",
+        " tour", " dj set", " dj", " set",
+        # City names as suffixes — catches "Zedd Brooklyn" where the
+        # truncation approach can't help (idx < 5 for short names).
+        " brooklyn", " new york", " nyc", " manhattan",
+        " chicago", " los angeles", " la", " miami",
+        " san francisco", " sf", " las vegas", " denver",
+        " seattle", " boston", " atlanta", " houston",
+        " dallas", " detroit", " philadelphia", " phoenix",
+        " portland", " nashville", " austin", " dc",
+        " washington", " minneapolis", " tampa",
+    ]:
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+
     return name.strip()
 
 
@@ -86,13 +117,21 @@ def _name_similarity(name1: str, name2: str) -> int:
     """Score 0-100 for how similar two event/artist names are."""
     a = extract_artist_name(name1)
     b = extract_artist_name(name2)
-    scores = [fuzz.ratio(a, b), fuzz.token_sort_ratio(a, b)]
+    base_scores = [fuzz.ratio(a, b), fuzz.token_sort_ratio(a, b)]
+    best_base = max(base_scores)
     # partial_ratio inflates scores when one name is very short
-    # (e.g. "wire" scores 100 against "wireless") — only trust it
+    # (e.g. "ale" scores 100 against "alex") — only trust it
     # when the shorter name is long enough to be distinctive.
-    if min(len(a), len(b)) >= 6:
-        scores.append(fuzz.partial_ratio(a, b))
-    return max(scores)
+    if min(len(a), len(b)) >= 5:
+        partial = fuzz.partial_ratio(a, b)
+        # Only trust partial_ratio when it's within 25 points of the
+        # base scores.  A big gap means partial matched a substring
+        # but the names are otherwise very different (e.g. "baby jane"
+        # partially matching "baby j & belters only": partial=80 but
+        # ratio=47).
+        if partial - best_base <= 25:
+            base_scores.append(partial)
+    return max(base_scores)
 
 
 MATCH_THRESHOLD = 70  # minimum fuzzy score to consider a match
