@@ -1,8 +1,8 @@
 """Standalone promo/discount code scanner for CrowdVolt events.
 
-Searches Reddit, blogs, and social media for promo codes on ticketing
-platforms (DICE, Eventbrite, AXS, etc.) for events with active CrowdVolt
-bids. Runs daily and sends a Discord summary.
+Searches Reddit, Twitter/X, promoter websites, and the web for promo
+codes on ticketing platforms (DICE, Eventbrite, AXS, etc.) for events
+with active CrowdVolt bids. Runs daily and sends a Discord summary.
 
 Usage:
     python promo_scanner.py          # run once
@@ -183,6 +183,200 @@ def _search_web(query: str, platform: str) -> list[dict]:
     return results
 
 
+# ---------------------------------------------------------------------------
+# NYC promoter & venue sites — curated sources for promo codes
+# ---------------------------------------------------------------------------
+
+PROMOTER_SITES = [
+    # Venues
+    {"name": "Avant Gardner", "url": "https://www.avantgardner.com", "twitter": "avaboreal"},
+    {"name": "Elsewhere", "url": "https://www.elsewherebrooklyn.com", "twitter": "elsewherezbk"},
+    {"name": "Brooklyn Mirage", "url": "https://www.brooklynmirage.com", "twitter": "thebkmirage"},
+    {"name": "Knockdown Center", "url": "https://knockdown.center", "twitter": "knockdowncenter"},
+    {"name": "Superior Ingredients", "url": "https://superioringredients.com", "twitter": "sup_ingredients"},
+    {"name": "Basement", "url": "https://basementny.com", "twitter": "basaboreal"},
+    # Promoters
+    {"name": "Teksupport", "url": "https://teksupport.com", "twitter": "taboreal"},
+    {"name": "Cityfox", "url": "https://cityfox.com", "twitter": "thecityfox"},
+    {"name": "Good Room", "url": "https://goodroombk.com", "twitter": "goodroombk"},
+    {"name": "Nowadays", "url": "https://nowadays.nyc", "twitter": "nowadaysnyc"},
+    {"name": "Bona Fide", "url": "https://www.bonafide.nyc", "twitter": "bonafidenyc"},
+    {"name": "Under Construction", "url": "https://underconstruction.nyc"},
+    {"name": "Resolute", "url": "https://ra.co/promoters/62737"},
+    {"name": "Schimanski", "url": "https://www.schimanskinyc.com", "twitter": "schimanskinyc"},
+]
+
+
+def _search_twitter(query: str) -> list[dict]:
+    """Search Twitter/X posts via DuckDuckGo site-scoped search."""
+    results = []
+    search_queries = [
+        f'site:x.com "{query}" code OR promo OR discount OR guestlist',
+        f'site:twitter.com "{query}" code OR promo OR discount',
+    ]
+
+    for sq in search_queries:
+        url = "https://html.duckduckgo.com/html/"
+        try:
+            resp = requests.post(
+                url, data={"q": sq}, headers=HEADERS, timeout=10,
+            )
+            if resp.status_code != 200:
+                continue
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for result in soup.select(".result")[:5]:
+                title_el = result.select_one(".result__title a")
+                snippet_el = result.select_one(".result__snippet")
+                if title_el:
+                    title = title_el.get_text(strip=True)
+                    snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+                    href = title_el.get("href", "")
+                    combined = f"{title} {snippet}".lower()
+                    query_lower = query.lower()
+                    if query_lower in combined or _fuzzy_contains(query_lower, combined):
+                        results.append({
+                            "source": "Twitter",
+                            "title": title[:100],
+                            "snippet": snippet[:200],
+                            "url": href,
+                        })
+        except requests.RequestException:
+            continue
+        time.sleep(1)
+
+    return results
+
+
+def _search_promoter_sites(query: str, venue: str) -> list[dict]:
+    """Check curated NYC promoter/venue websites for promo codes."""
+    results = []
+    query_lower = query.lower()
+    venue_lower = venue.lower() if venue else ""
+
+    for site in PROMOTER_SITES:
+        # Only check sites relevant to this event's venue
+        site_name_lower = site["name"].lower()
+        if venue_lower and site_name_lower not in venue_lower and venue_lower not in site_name_lower:
+            # Also check via web search for this promoter + event
+            continue
+
+        try:
+            resp = requests.get(
+                site["url"], headers=HEADERS, timeout=10, allow_redirects=True,
+            )
+            if resp.status_code != 200:
+                continue
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            page_text = soup.get_text(" ", strip=True).lower()
+
+            # Check if this event is mentioned on the promoter's site
+            if query_lower not in page_text and not _fuzzy_contains(query_lower, page_text):
+                continue
+
+            # Look for promo-related content near the event mention
+            codes = _extract_codes(page_text)
+            has_promo = any(
+                kw in page_text
+                for kw in ["promo", "discount", "code", "early bird",
+                           "guest list", "guestlist", "reduced", "% off",
+                           "free before", "no cover", "rsvp"]
+            )
+
+            if codes or has_promo:
+                results.append({
+                    "source": site["name"],
+                    "title": f"{site['name']} — event page mentions promo",
+                    "snippet": "",
+                    "url": site["url"],
+                    "codes": codes,
+                })
+        except requests.RequestException:
+            continue
+        time.sleep(0.5)
+
+    # Also search for venue/promoter Twitter posts about this event
+    for site in PROMOTER_SITES:
+        twitter_handle = site.get("twitter")
+        if not twitter_handle:
+            continue
+
+        sq = f'site:x.com from:{twitter_handle} "{query_lower}" code OR promo OR discount OR guestlist'
+        url = "https://html.duckduckgo.com/html/"
+        try:
+            resp = requests.post(url, data={"q": sq}, headers=HEADERS, timeout=10)
+            if resp.status_code != 200:
+                continue
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for result in soup.select(".result")[:3]:
+                title_el = result.select_one(".result__title a")
+                snippet_el = result.select_one(".result__snippet")
+                if title_el:
+                    title = title_el.get_text(strip=True)
+                    snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+                    href = title_el.get("href", "")
+                    results.append({
+                        "source": f"@{twitter_handle}",
+                        "title": title[:100],
+                        "snippet": snippet[:200],
+                        "url": href,
+                    })
+        except requests.RequestException:
+            continue
+        time.sleep(0.5)
+
+    return results
+
+
+def _search_instagram(query: str, artist_slug: str) -> list[dict]:
+    """Check Instagram public profiles for promo mentions.
+
+    Scrapes the public web version of profiles — no API key needed.
+    Only gets post captions from the page HTML, not stories.
+    """
+    results = []
+    # Try the artist/event name as an Instagram handle
+    # (many artists use their name as handle: chrislake, peggy_gou_, etc.)
+    handle_guesses = [
+        artist_slug.replace("-", ""),
+        artist_slug.replace("-", "_"),
+        artist_slug.replace("-", "."),
+    ]
+
+    for handle in handle_guesses:
+        url = f"https://www.instagram.com/{handle}/"
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            if resp.status_code != 200:
+                continue
+
+            # Instagram embeds post data in shared_data or meta tags
+            page_text = resp.text.lower()
+
+            # Check meta description for promo mentions
+            soup = BeautifulSoup(resp.text, "html.parser")
+            meta_desc = soup.find("meta", attrs={"property": "og:description"})
+            if meta_desc:
+                content = meta_desc.get("content", "").lower()
+                if any(kw in content for kw in ["code", "promo", "discount",
+                                                  "guestlist", "free"]):
+                    results.append({
+                        "source": "Instagram",
+                        "title": f"@{handle} bio/recent post mentions promo",
+                        "snippet": meta_desc.get("content", "")[:200],
+                        "url": url,
+                    })
+
+            break  # found a valid profile
+        except requests.RequestException:
+            continue
+        time.sleep(0.5)
+
+    return results
+
+
 def _extract_codes(text: str) -> list[str]:
     """Pull promo-code-looking strings from text."""
     codes = set()
@@ -225,9 +419,12 @@ def scan_promos(dry_run: bool = False) -> list[PromoResult]:
         platform = event.ticket_platform
         print(f"\n[Promo] {event.name} [{platform}] — bid ${event.max_bid:.0f}")
 
-        # Search Reddit and web
+        # Search all sources
         raw_results = []
         raw_results.extend(_search_reddit(event.name, platform))
+        raw_results.extend(_search_twitter(event.name))
+        raw_results.extend(_search_promoter_sites(event.name, event.venue))
+        raw_results.extend(_search_instagram(event.name, event.slug))
         raw_results.extend(_search_web(event.name, platform))
 
         # Deduplicate by URL
@@ -241,7 +438,7 @@ def scan_promos(dry_run: bool = False) -> list[PromoResult]:
         # Score relevance — check for actual code-like strings
         for r in unique:
             combined_text = f"{r['title']} {r['snippet']}"
-            codes = _extract_codes(combined_text)
+            codes = r.get("codes", []) or _extract_codes(combined_text)
 
             # Even without extracted codes, flag results that mention
             # promo/discount in context of this event
