@@ -47,15 +47,32 @@ PROMO_PLATFORMS = {"DICE", "EVENTBRITE", "AXS", "TIXR", "POSH", "SEE TICKETS"}
 # Patterns that look like promo/discount codes in text
 _CODE_RE = re.compile(
     r"""(?:
-        (?:code|promo|discount|coupon|use)   # keyword before
-        \s*[:=]?\s*                          # optional separator
-        ["\']?([A-Z0-9_-]{3,20})["\']?       # the code itself
+        (?:code|promo\s*code|discount\s*code|coupon|use)\s*  # keyword before
+        [:=\s"']+                                            # separator
+        ([A-Z][A-Z0-9_-]{2,19})                              # the code (starts with letter)
     |
-        ["\']([A-Z0-9_-]{4,15})["\']         # quoted code
-        \s*(?:for|to get|saves?|off)          # keyword after
+        ["']([A-Z][A-Z0-9_-]{3,14})["']                      # quoted code
+        \s*(?:for|to\s+get|saves?|off|discount)               # keyword after
     )""",
     re.IGNORECASE | re.VERBOSE,
 )
+
+# Common words that look like codes but aren't
+_CODE_BLACKLIST = {
+    "THE", "FOR", "AND", "GET", "USE", "OFF", "CODE", "WITH", "FREE",
+    "SALE", "HTTP", "HTTPS", "HTML", "JSON", "NULL", "THIS", "THAT",
+    "THEY", "THEM", "WHEN", "WHAT", "WILL", "YOUR", "FROM", "HAVE",
+    "BEEN", "SOME", "DOES", "DONT", "WERE", "HIYA", "HELLO", "PLEASE",
+    "ALSO", "JUST", "LIKE", "MORE", "MOST", "VERY", "MUCH", "THAN",
+    "THEN", "ONLY", "EACH", "BOTH", "INTO", "OVER", "SUCH", "MAKE",
+    "BACK", "EVEN", "GOOD", "WELL", "MUST", "HERE", "COME", "COULD",
+    "WOULD", "ABOUT", "EMAIL", "LATER", "COULD", "PROMO", "WHICH",
+    "THERE", "WHERE", "THESE", "THOSE", "STILL", "AFTER", "BEFORE",
+    "CAN", "BUT", "NOT", "WAS", "ARE", "OUR", "HIS", "HER", "ITS",
+    "MAY", "NOW", "OLD", "NEW", "WAY", "DAY", "DID", "HAD", "HAS",
+    "HOW", "ITS", "LET", "MAY", "OWN", "SAY", "SHE", "TOO", "WHO",
+    "FUL", "DON",
+}
 
 HEADERS = {
     "User-Agent": (
@@ -71,21 +88,21 @@ HEADERS = {
 # ---------------------------------------------------------------------------
 
 def _search_reddit(query: str, platform: str) -> list[dict]:
-    """Search Reddit for promo code posts."""
+    """Search Reddit for promo code posts related to the event."""
     results = []
     search_queries = [
-        f"{query} {platform} promo code",
-        f"{query} {platform} discount",
-        f"{query} presale code",
+        f'"{query}" promo code',
+        f'"{query}" presale code',
+        f'"{query}" discount ticket',
     ]
 
     for sq in search_queries:
-        url = f"https://www.reddit.com/search.json"
+        url = "https://www.reddit.com/search.json"
         params = {
             "q": sq,
             "sort": "new",
-            "t": "month",  # last month
-            "limit": 10,
+            "t": "month",
+            "limit": 5,
         }
         try:
             resp = requests.get(
@@ -96,30 +113,44 @@ def _search_reddit(query: str, platform: str) -> list[dict]:
                 data = resp.json()
                 for post in data.get("data", {}).get("children", []):
                     d = post.get("data", {})
-                    results.append({
-                        "source": "Reddit",
-                        "title": d.get("title", ""),
-                        "snippet": d.get("selftext", "")[:300],
-                        "url": f"https://reddit.com{d.get('permalink', '')}",
-                        "subreddit": d.get("subreddit", ""),
-                    })
+                    title = d.get("title", "")
+                    body = d.get("selftext", "")[:300]
+                    combined = f"{title} {body}".lower()
+                    # Only keep results that mention the event name
+                    query_lower = query.lower()
+                    if query_lower in combined or _fuzzy_contains(query_lower, combined):
+                        results.append({
+                            "source": "Reddit",
+                            "title": title,
+                            "snippet": body,
+                            "url": f"https://reddit.com{d.get('permalink', '')}",
+                        })
         except requests.RequestException:
             pass
-        time.sleep(1)  # respect rate limits
+        time.sleep(1)
 
     return results
+
+
+def _fuzzy_contains(query: str, text: str) -> bool:
+    """Check if query words appear close together in text."""
+    words = query.split()
+    if len(words) < 2:
+        return query in text
+    # All words must appear somewhere in the text
+    return all(w in text for w in words)
 
 
 def _search_web(query: str, platform: str) -> list[dict]:
     """Search the web via DuckDuckGo HTML for promo codes."""
     results = []
     search_queries = [
-        f"{query} {platform} promo code 2026",
-        f"{query} {platform} discount code",
+        f'"{query}" {platform} promo code 2026',
+        f'"{query}" presale code discount',
     ]
 
     for sq in search_queries:
-        url = f"https://html.duckduckgo.com/html/"
+        url = "https://html.duckduckgo.com/html/"
         try:
             resp = requests.post(
                 url,
@@ -129,17 +160,22 @@ def _search_web(query: str, platform: str) -> list[dict]:
             )
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "html.parser")
-                for result in soup.select(".result"):
+                for result in soup.select(".result")[:5]:
                     title_el = result.select_one(".result__title a")
                     snippet_el = result.select_one(".result__snippet")
                     if title_el:
-                        href = title_el.get("href", "")
-                        results.append({
-                            "source": "Web",
-                            "title": title_el.get_text(strip=True),
-                            "snippet": snippet_el.get_text(strip=True) if snippet_el else "",
-                            "url": href,
-                        })
+                        title = title_el.get_text(strip=True)
+                        snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+                        combined = f"{title} {snippet}".lower()
+                        query_lower = query.lower()
+                        if query_lower in combined or _fuzzy_contains(query_lower, combined):
+                            href = title_el.get("href", "")
+                            results.append({
+                                "source": "Web",
+                                "title": title,
+                                "snippet": snippet,
+                                "url": href,
+                            })
         except requests.RequestException:
             pass
         time.sleep(1.5)
@@ -152,13 +188,8 @@ def _extract_codes(text: str) -> list[str]:
     codes = set()
     for match in _CODE_RE.finditer(text):
         code = match.group(1) or match.group(2)
-        if code:
-            # Filter out common false positives
-            upper = code.upper()
-            if upper not in {"THE", "FOR", "AND", "GET", "USE", "OFF",
-                             "CODE", "WITH", "FREE", "SALE", "HTTP",
-                             "HTTPS", "HTML", "JSON", "NULL"}:
-                codes.add(code)
+        if code and code.upper() not in _CODE_BLACKLIST:
+            codes.add(code.upper())
     return sorted(codes)
 
 
