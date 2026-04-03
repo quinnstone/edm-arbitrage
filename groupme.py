@@ -3,13 +3,21 @@
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Optional
 
 import requests
+from dateutil import parser as dateparser
 
 import config
 from crowdvolt import CrowdVoltEvent
-from matcher import _name_similarity, MATCH_THRESHOLD
+from matcher import _name_similarity, _dates_match, _cities_match
+
+# Higher threshold for GroupMe — messages are unstructured text so we need
+# stronger name evidence.  Cross-platform matchers use 70 but have date+city
+# as backup; GroupMe messages often lack both.
+_GM_MATCH_THRESHOLD = 80
+_GM_CONFIRMED_THRESHOLD = 70  # OK to lower when date OR city confirms
 
 # Patterns indicating someone wants to buy a ticket.
 # "anyone selling" is buy intent (asking the group), not a sell post.
@@ -51,6 +59,7 @@ class BuyRequest:
     event_query: str
     message_id: str
     created_at: int  # unix timestamp
+    mentioned_date: Optional[datetime] = None  # date extracted from message
 
 
 @dataclass
@@ -62,6 +71,7 @@ class SellListing:
     qty: int
     message_id: str
     created_at: int  # unix timestamp
+    mentioned_date: Optional[datetime] = None  # date extracted from message
 
 
 @dataclass
@@ -128,6 +138,60 @@ def fetch_recent_messages(minutes: int = 10080) -> list[dict]:
         time.sleep(0.3)  # respect rate limits between pages
 
     return messages
+
+
+# ---------------------------------------------------------------------------
+# Date extraction
+# ---------------------------------------------------------------------------
+
+# Day-of-week and relative date patterns
+_DAY_NAMES = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+    "mon": 0, "tue": 1, "tues": 1, "wed": 2, "thu": 3, "thur": 3,
+    "thurs": 3, "fri": 4, "sat": 5, "sun": 6,
+}
+
+def _extract_date_from_text(text: str) -> Optional[datetime]:
+    """Try to extract an event date from a GroupMe message.
+
+    Handles patterns like:
+    - "April 4", "Apr 18", "4/4", "4/18"
+    - "Saturday", "this Friday", "tomorrow", "tonight"
+    - Falls back to dateutil fuzzy parsing
+    """
+    lower = text.lower()
+
+    # "tonight" / "today"
+    if re.search(r"\b(?:tonight|today)\b", lower):
+        return datetime.now()
+
+    # "tomorrow"
+    if re.search(r"\btomorrow\b", lower):
+        return datetime.now() + timedelta(days=1)
+
+    # Day names: "Saturday", "this Friday", "next Saturday"
+    for day_name, day_num in _DAY_NAMES.items():
+        if re.search(r"\b" + day_name + r"\b", lower):
+            today = datetime.now()
+            days_ahead = (day_num - today.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7  # next occurrence
+            return today + timedelta(days=days_ahead)
+
+    # Explicit dates: "April 4", "Apr 18", "4/4", "4/18/26"
+    # Try dateutil fuzzy parsing — it handles most formats
+    try:
+        parsed = dateparser.parse(text, fuzzy=True)
+        if parsed and parsed.year >= 2025:
+            # If the parsed date is in the past and no year was explicit,
+            # it might be next year — but for a 7-day window, past dates
+            # within a few days are probably correct
+            return parsed
+    except (ValueError, TypeError, OverflowError):
+        pass
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +396,7 @@ def parse_sell_listings(messages: list[dict]) -> list[SellListing]:
                 qty=qty,
                 message_id=msg.get("id", ""),
                 created_at=msg.get("created_at", 0),
+                mentioned_date=_extract_date_from_text(msg.get("text", "")),
             ))
     return out
 
@@ -348,6 +413,7 @@ def parse_buy_requests(messages: list[dict]) -> list[BuyRequest]:
                 event_query=query,
                 message_id=msg.get("id", ""),
                 created_at=msg.get("created_at", 0),
+                mentioned_date=_extract_date_from_text(msg.get("text", "")),
             ))
     return out
 
@@ -356,28 +422,71 @@ def parse_buy_requests(messages: list[dict]) -> list[BuyRequest]:
 # Matching
 # ---------------------------------------------------------------------------
 
+def _is_confirmed(request_date, event, default_city: str = "New York") -> bool:
+    """Check if date or city from the message confirms the CrowdVolt match.
+
+    GroupMe is NYC-based, so messages without a city are assumed NYC.
+    A recent message (last 48h) for an event within 7 days also counts
+    as soft confirmation — recency implies the event is upcoming and local.
+    """
+    # Date confirmation
+    if request_date and event.event_date:
+        if _dates_match(request_date, event.event_date, tolerance_days=1):
+            return True
+
+    # City confirmation — assume NYC for this group
+    if event.city and _cities_match(default_city, event.city):
+        return True
+
+    return False
+
+
 def match_demand(
     buy_requests: list[BuyRequest],
     cv_events: list[CrowdVoltEvent],
 ) -> list[GroupMeMatch]:
     """Match buy requests against CrowdVolt events (including DICE).
 
-    Returns one GroupMeMatch per matched event, with all matching buy
-    requests grouped together.
+    Uses tiered thresholds:
+    - Score >= 80: match (strong name match alone is enough)
+    - Score 70-79: match only if date OR city confirms
+
+    Skips past events. Returns one GroupMeMatch per matched event,
+    with all matching buy requests grouped together.
     """
-    matches: dict[str, GroupMeMatch] = {}  # keyed by event slug
+    today = datetime.now().date()
+    # Filter out past events
+    active_events = [
+        e for e in cv_events
+        if e.event_date is None or e.event_date.date() >= today
+    ]
+
+    matches: dict[str, GroupMeMatch] = {}
 
     for req in buy_requests:
         best_score = 0
         best_event = None
 
-        for event in cv_events:
+        for event in active_events:
             score = _name_similarity(req.event_query, event.name)
-            if score > best_score and score >= MATCH_THRESHOLD:
+            if score <= best_score:
+                continue
+
+            if score >= _GM_MATCH_THRESHOLD:
                 best_score = score
                 best_event = event
+            elif score >= _GM_CONFIRMED_THRESHOLD:
+                if _is_confirmed(req.mentioned_date, event):
+                    best_score = score
+                    best_event = event
 
         if best_event:
+            # Final date contradiction check — if the message mentions a
+            # specific date that does NOT match the event, skip it
+            if (req.mentioned_date and best_event.event_date
+                    and not _dates_match(req.mentioned_date, best_event.event_date, tolerance_days=1)):
+                continue
+
             slug = best_event.slug
             if slug in matches:
                 matches[slug].buy_requests.append(req)
@@ -399,11 +508,21 @@ def match_supply(
     Only considers events where someone on CrowdVolt is already offering
     to buy — no bid means no guaranteed buyer, so no alert.
 
-    Returns one match per event, with all matching sell listings grouped.
-    """
-    events_with_bids = [e for e in cv_events if e.max_bid is not None]
+    Uses tiered thresholds (same as demand):
+    - Score >= 80: match
+    - Score 70-79: match only if date OR city confirms
 
-    matches: dict[str, GroupMeSellMatch] = {}  # keyed by event slug
+    Skips past events. Returns one match per event, with all matching
+    sell listings grouped.
+    """
+    today = datetime.now().date()
+    events_with_bids = [
+        e for e in cv_events
+        if e.max_bid is not None
+        and (e.event_date is None or e.event_date.date() >= today)
+    ]
+
+    matches: dict[str, GroupMeSellMatch] = {}
 
     for listing in sell_listings:
         best_score = 0
@@ -411,11 +530,22 @@ def match_supply(
 
         for event in events_with_bids:
             score = _name_similarity(listing.event_query, event.name)
-            if score > best_score and score >= MATCH_THRESHOLD:
+            if score <= best_score:
+                continue
+
+            if score >= _GM_MATCH_THRESHOLD:
                 best_score = score
                 best_event = event
+            elif score >= _GM_CONFIRMED_THRESHOLD:
+                if _is_confirmed(listing.mentioned_date, event):
+                    best_score = score
+                    best_event = event
 
         if best_event:
+            if (listing.mentioned_date and best_event.event_date
+                    and not _dates_match(listing.mentioned_date, best_event.event_date, tolerance_days=1)):
+                continue
+
             slug = best_event.slug
             if slug in matches:
                 matches[slug].sell_listings.append(listing)

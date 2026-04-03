@@ -143,8 +143,8 @@ def send_groupme_alert(match: GroupMeMatch) -> bool:
     ]
 
     embed = {
-        "title": f"💬 {cv.name}",
-        "description": f"{cv.venue} — {cv.city} — {date_str}{platform_str}",
+        "title": f"💬 Buy on CrowdVolt → Sell to GroupMe",
+        "description": f"**{cv.name}**\n{cv.venue} — {cv.city} — {date_str}{platform_str}",
         "color": 0xFF9800,  # orange — distinct from green arbitrage alerts
         "fields": fields,
     }
@@ -214,8 +214,8 @@ def send_groupme_sell_alert(match: GroupMeSellMatch) -> bool:
     ]
 
     embed = {
-        "title": f"🏷️ {cv.name}",
-        "description": f"{cv.venue} — {cv.city} — {date_str}{platform_str}",
+        "title": f"🏷️ Buy from GroupMe → Sell on CrowdVolt",
+        "description": f"**{cv.name}**\n{cv.venue} — {cv.city} — {date_str}{platform_str}",
         "color": 0x9B59B6,  # purple — distinct from green arb and orange demand
         "fields": fields,
     }
