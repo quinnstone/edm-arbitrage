@@ -100,18 +100,6 @@ def _dates_match(dt1, dt2, tolerance_days: int = 1) -> bool:
     return abs((d1 - d2).days) <= tolerance_days
 
 
-def _dates_confirmed(dt1, dt2, tolerance_days: int = 1) -> bool:
-    """Like _dates_match but returns False when either date is missing.
-
-    Used for high-confidence matching: only skip city checks when we
-    can positively verify the dates line up.
-    """
-    if dt1 is None or dt2 is None:
-        return False
-    d1 = dt1.date() if hasattr(dt1, 'date') else dt1
-    d2 = dt2.date() if hasattr(dt2, 'date') else dt2
-    return abs((d1 - d2).days) <= tolerance_days
-
 
 def _name_similarity(name1: str, name2: str) -> int:
     """Score 0-100 for how similar two event/artist names are."""
@@ -135,7 +123,6 @@ def _name_similarity(name1: str, name2: str) -> int:
 
 
 MATCH_THRESHOLD = 70  # minimum fuzzy score to consider a match
-HIGH_CONFIDENCE_THRESHOLD = 85  # skip city check when name+date match this well
 
 # Event names containing these words are not real tickets
 JUNK_KEYWORDS = {"parking", "merch", "merchandise", "shuttle", "camping", "locker"}
@@ -170,6 +157,17 @@ def _normalize_city(raw: str) -> str:
     return CITY_ALIASES.get(city, city)
 
 
+def _venues_match(venue1: str, venue2: str) -> bool:
+    """Check if two venue names refer to the same place."""
+    if not venue1 or not venue2:
+        return True  # if either is missing, can't disprove — allow through
+    v1 = venue1.lower().strip()
+    v2 = venue2.lower().strip()
+    if v1 == v2 or v1 in v2 or v2 in v1:
+        return True
+    return fuzz.ratio(v1, v2) >= 75
+
+
 def _cities_match(city1: str, city2: str) -> bool:
     """Check if two city strings refer to the same metro area."""
     if not city1 or not city2:
@@ -183,6 +181,18 @@ def _cities_match(city1: str, city2: str) -> bool:
 
     # Fuzzy fallback for cities with slight name variations
     return fuzz.ratio(c1, c2) >= 80
+
+
+def _location_match(city1: str, city2: str, venue1: str = "", venue2: str = "") -> bool:
+    """Check if two events are at the same location.
+
+    Tries city first; falls back to venue comparison when city is missing
+    on either side. Only allows through when BOTH city and venue are empty.
+    """
+    if city1 and city2:
+        return _cities_match(city1, city2)
+    # City missing on one or both sides — fall back to venue
+    return _venues_match(venue1, venue2)
 
 
 def match_seatgeek(
@@ -201,8 +211,7 @@ def match_seatgeek(
             continue
         if not _dates_match(cv_event.event_date, sg.event_date):
             continue
-        high_conf = score >= HIGH_CONFIDENCE_THRESHOLD and _dates_confirmed(cv_event.event_date, sg.event_date)
-        if not high_conf and not _cities_match(cv_event.city, sg.city):
+        if not _location_match(cv_event.city, sg.city, cv_event.venue, sg.venue):
             continue
         if sg.lowest_price is None:
             continue
@@ -248,8 +257,7 @@ def match_tickpick(
             continue
         if not _dates_match(cv_event.event_date, tp.event_date):
             continue
-        high_conf = score >= HIGH_CONFIDENCE_THRESHOLD and _dates_confirmed(cv_event.event_date, tp.event_date)
-        if not high_conf and not _cities_match(cv_event.city, tp.city):
+        if not _location_match(cv_event.city, tp.city, cv_event.venue, tp.venue):
             continue
         if tp.low_price is None:
             continue
@@ -295,8 +303,7 @@ def match_stubhub(
             continue
         if not _dates_match(cv_event.event_date, sh.event_date):
             continue
-        high_conf = score >= HIGH_CONFIDENCE_THRESHOLD and _dates_confirmed(cv_event.event_date, sh.event_date)
-        if not high_conf and not _cities_match(cv_event.city, sh.city):
+        if not _location_match(cv_event.city, sh.city, cv_event.venue, sh.venue):
             continue
         if sh.min_price is None:
             continue
@@ -348,8 +355,7 @@ def match_vividseats(
             continue
         if not _dates_match(cv_event.event_date, vs.event_date):
             continue
-        high_conf = score >= HIGH_CONFIDENCE_THRESHOLD and _dates_confirmed(cv_event.event_date, vs.event_date)
-        if not high_conf and not _cities_match(cv_event.city, vs.city):
+        if not _location_match(cv_event.city, vs.city, cv_event.venue, vs.venue):
             continue
         if vs.min_price is None:
             continue
