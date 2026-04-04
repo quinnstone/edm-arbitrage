@@ -330,52 +330,6 @@ def _search_promoter_sites(query: str, venue: str) -> list[dict]:
     return results
 
 
-def _search_instagram(query: str, artist_slug: str) -> list[dict]:
-    """Check Instagram public profiles for promo mentions.
-
-    Scrapes the public web version of profiles — no API key needed.
-    Only gets post captions from the page HTML, not stories.
-    """
-    results = []
-    # Try the artist/event name as an Instagram handle
-    # (many artists use their name as handle: chrislake, peggy_gou_, etc.)
-    handle_guesses = [
-        artist_slug.replace("-", ""),
-        artist_slug.replace("-", "_"),
-        artist_slug.replace("-", "."),
-    ]
-
-    for handle in handle_guesses:
-        url = f"https://www.instagram.com/{handle}/"
-        try:
-            resp = requests.get(url, headers=HEADERS, timeout=10)
-            if resp.status_code != 200:
-                continue
-
-            # Instagram embeds post data in shared_data or meta tags
-            page_text = resp.text.lower()
-
-            # Check meta description for promo mentions
-            soup = BeautifulSoup(resp.text, "html.parser")
-            meta_desc = soup.find("meta", attrs={"property": "og:description"})
-            if meta_desc:
-                content = meta_desc.get("content", "").lower()
-                if any(kw in content for kw in ["code", "promo", "discount",
-                                                  "guestlist", "free"]):
-                    results.append({
-                        "source": "Instagram",
-                        "title": f"@{handle} bio/recent post mentions promo",
-                        "snippet": meta_desc.get("content", "")[:200],
-                        "url": url,
-                    })
-
-            break  # found a valid profile
-        except requests.RequestException:
-            continue
-        time.sleep(0.5)
-
-    return results
-
 
 def _extract_codes(text: str) -> list[str]:
     """Pull promo-code-looking strings from text."""
@@ -403,15 +357,19 @@ def scan_promos(dry_run: bool = False) -> list[PromoResult]:
         print("[Promo] No CrowdVolt events found")
         return []
 
-    # Only scan events with active bids on platforms that support promo codes
+    # Only scan events with active bids on platforms that support promo codes,
+    # happening within the next 14 days (promo codes are shared close to event)
+    from datetime import timedelta
+    horizon = datetime.now() + timedelta(days=14)
     eligible = [
         e for e in cv_events
         if e.max_bid is not None
         and e.ticket_platform.upper() in PROMO_PLATFORMS
+        and (e.event_date is None or e.event_date <= horizon)
     ]
 
     print(f"[Promo] {len(eligible)} events with bids on promo-eligible platforms "
-          f"(out of {len(cv_events)} total)")
+          f"within 14 days (out of {len(cv_events)} total)")
 
     all_results = []
 
@@ -424,7 +382,6 @@ def scan_promos(dry_run: bool = False) -> list[PromoResult]:
         raw_results.extend(_search_reddit(event.name, platform))
         raw_results.extend(_search_twitter(event.name))
         raw_results.extend(_search_promoter_sites(event.name, event.venue))
-        raw_results.extend(_search_instagram(event.name, event.slug))
         raw_results.extend(_search_web(event.name, platform))
 
         # Deduplicate by URL
