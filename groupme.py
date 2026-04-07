@@ -455,10 +455,12 @@ def match_demand(
     with all matching buy requests grouped together.
     """
     today = datetime.now().date()
-    # Filter out past events
+    # Filter to future events with active sellers — no seller means
+    # nothing to buy on CrowdVolt, so no actionable opportunity.
     active_events = [
         e for e in cv_events
-        if e.event_date is None or e.event_date.date() >= today
+        if e.min_ask is not None
+        and (e.event_date is None or e.event_date.date() >= today)
     ]
 
     matches: dict[str, GroupMeMatch] = {}
