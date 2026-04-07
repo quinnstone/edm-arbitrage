@@ -248,6 +248,113 @@ def _search_twitter(query: str) -> list[dict]:
     return results
 
 
+def _search_ra(query: str, event_date: str = None) -> list[dict]:
+    """Search Resident Advisor for event pages with promo code mentions."""
+    results = []
+
+    # Step 1: Search RA for matching events
+    gql_search = {
+        "query": (
+            '{ search(searchTerm: "%s", indices: [EVENT], limit: 5) '
+            '{ id value date contentUrl clubName areaName } }'
+        ) % query.replace('"', '\\"')
+    }
+    ra_headers = {
+        **HEADERS,
+        "Content-Type": "application/json",
+        "Referer": "https://ra.co/",
+    }
+
+    try:
+        resp = requests.post(
+            "https://ra.co/graphql", json=gql_search,
+            headers=ra_headers, timeout=config.REQUEST_TIMEOUT,
+        )
+        if resp.status_code != 200:
+            return results
+        hits = resp.json().get("data", {}).get("search", [])
+    except requests.RequestException:
+        return results
+
+    if not hits:
+        return results
+
+    # Step 2: For each hit, fetch full event details
+    for hit in hits[:3]:
+        # Optional date filter — skip if dates don't match
+        if event_date and hit.get("date"):
+            try:
+                ra_date = hit["date"][:10]  # "2026-04-10T..."
+                if ra_date != event_date:
+                    continue
+            except (IndexError, TypeError):
+                pass
+
+        event_id = hit["id"]
+        gql_event = {
+            "query": (
+                '{ event(id: %s) { title content cost contentUrl '
+                'promotionalLinks { url title } '
+                'tickets { title } } }'
+            ) % event_id
+        }
+
+        try:
+            resp = requests.post(
+                "https://ra.co/graphql", json=gql_event,
+                headers=ra_headers, timeout=config.REQUEST_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                continue
+            ev = resp.json().get("data", {}).get("event")
+            if not ev:
+                continue
+        except requests.RequestException:
+            continue
+
+        # Combine all text fields for code extraction
+        content = ev.get("content") or ""
+        cost = ev.get("cost") or ""
+        promo_links = ev.get("promotionalLinks") or []
+        link_text = " ".join(
+            f"{pl.get('title', '')} {pl.get('url', '')}" for pl in promo_links
+        )
+        combined = f"{content} {cost} {link_text}"
+
+        # Check for promo-related content
+        codes = _extract_codes(combined)
+        has_promo = any(
+            kw in combined.lower()
+            for kw in ["promo", "discount", "code", "coupon", "early bird",
+                        "guest list", "guestlist", "reduced", "% off",
+                        "free before", "no cover", "rsvp"]
+        )
+
+        # Also check for embedded codes in ticket URLs (e.g., ?code=XYZ)
+        for pl in promo_links:
+            url = pl.get("url", "")
+            if "code=" in url.lower():
+                # Extract the code param
+                m = re.search(r'[?&]code=([A-Za-z0-9_-]+)', url)
+                if m and m.group(1).upper() not in _CODE_BLACKLIST:
+                    codes.append(m.group(1).upper())
+
+        if codes or has_promo:
+            event_url = f"https://ra.co{ev.get('contentUrl', '')}"
+            snippet = content[:200] if content else ""
+            results.append({
+                "source": "RA",
+                "title": ev.get("title", hit.get("value", "")),
+                "snippet": snippet,
+                "url": event_url,
+                "codes": codes,
+            })
+
+        time.sleep(0.5)
+
+    return results
+
+
 def _search_promoter_sites(query: str, venue: str) -> list[dict]:
     """Check curated NYC promoter/venue websites for promo codes."""
     results = []
@@ -378,9 +485,11 @@ def scan_promos(dry_run: bool = False) -> list[PromoResult]:
         print(f"\n[Promo] {event.name} [{platform}] — bid ${event.max_bid:.0f}")
 
         # Search all sources
+        date_str = event.event_date.strftime("%Y-%m-%d") if event.event_date else None
         raw_results = []
         raw_results.extend(_search_reddit(event.name, platform))
         raw_results.extend(_search_twitter(event.name))
+        raw_results.extend(_search_ra(event.name, date_str))
         raw_results.extend(_search_promoter_sites(event.name, event.venue))
         raw_results.extend(_search_web(event.name, platform))
 
