@@ -194,8 +194,8 @@ def _extract_next_data(page) -> list[GametimeEvent]:
                     _search(item, depth + 1)
 
         _search(data)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  [Gametime] __NEXT_DATA__ extraction failed: {e}")
     return events
 
 
@@ -226,8 +226,8 @@ def _extract_json_ld(page) -> list[GametimeEvent]:
                         event = _parse_ld_event(nested)
                         if event:
                             events.append(event)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  [Gametime] JSON-LD extraction failed: {e}")
     return events
 
 
@@ -349,7 +349,8 @@ def _extract_from_dom(page) -> list[GametimeEvent]:
                 url=clean_url,
                 price_is_all_in=True,
             ))
-        except Exception:
+        except Exception as e:
+            print(f"  [Gametime] DOM card parse error: {e}")
             continue
 
     return events

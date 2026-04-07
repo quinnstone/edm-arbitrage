@@ -183,7 +183,8 @@ def _parse_search_cards(page) -> list[StubHubEvent]:
                 min_price=None,
                 url=clean_url,
             ))
-        except Exception:
+        except Exception as e:
+            print(f"  [StubHub] Card parse error: {e}")
             continue
 
     return candidates

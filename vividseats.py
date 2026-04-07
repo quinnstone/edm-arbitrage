@@ -167,8 +167,8 @@ def _extract_next_data(page) -> list[VividSeatsEvent]:
                     _search(item, depth + 1)
 
         _search(data)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  [VividSeats] __NEXT_DATA__ extraction failed: {e}")
     return events
 
 
@@ -239,7 +239,8 @@ def _extract_from_search(page) -> list[VividSeatsEvent]:
                     min_price=min_price,
                     url=full_url,
                 ))
-        except Exception:
+        except Exception as e:
+            print(f"  [VividSeats] DOM card parse error: {e}")
             continue
 
     # Fallback: try JSON-LD if DOM extraction failed
@@ -278,8 +279,8 @@ def _extract_json_ld(page) -> list[VividSeatsEvent]:
                         event = _parse_ld_event(nested)
                         if event:
                             events.append(event)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  [VividSeats] JSON-LD extraction failed: {e}")
 
     return events
 
