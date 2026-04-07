@@ -13,6 +13,7 @@ from datetime import datetime
 
 import config
 import crowdvolt
+import gametime
 import groupme
 import matcher
 import notifier
@@ -39,6 +40,13 @@ def scan_once() -> int:
     # matching uses the full catalog (including DICE) since a GroupMe
     # seller transfers the ticket to you directly.
     all_cv_events = cv_events[:]
+
+    # Filter out past events — no point scanning events that already happened
+    today = datetime.now().date()
+    past_events = [e for e in cv_events if e.event_date and e.event_date.date() < today]
+    cv_events = [e for e in cv_events if e.event_date is None or e.event_date.date() >= today]
+    if past_events:
+        print(f"[Scan] Filtered out {len(past_events)} past events")
 
     # Filter out DICE-only events — tickets require in-app transfer
     # and can't be fulfilled with third-party QR codes from StubHub, etc.
@@ -134,8 +142,22 @@ def scan_once() -> int:
             except Exception as e:
                 print(f"  [VividSeats] Error: {e}")
                 errors += 1
+
+            # Search Gametime
+            try:
+                gt_results = gametime.search_events(query, date_str)
+                if gt_results:
+                    gt_opps = matcher.match_gametime(cv_event, gt_results)
+                    if gt_opps:
+                        event_matched = True
+                    for opp in gt_opps:
+                        _log_opportunity(opp)
+                    all_opportunities.extend(gt_opps)
+            except Exception as e:
+                print(f"  [Gametime] Error: {e}")
+                errors += 1
         else:
-            print(f"  [StubHub/VividSeats] Skipped — no waiting buyers")
+            print(f"  [StubHub/VividSeats/Gametime] Skipped — no waiting buyers")
 
         if not event_matched:
             print(f"  [No Match] Could not match on any platform")

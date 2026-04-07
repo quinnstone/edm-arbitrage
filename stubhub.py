@@ -197,8 +197,8 @@ def _fetch_event_price(page, event_url: str) -> Optional[tuple[float, bool]]:
         # Wait for ticket listing prices to render (JS-rendered, takes a moment)
         try:
             page.wait_for_function(
-                "() => document.body.innerText.includes('incl. fees')",
-                timeout=10000,
+                "() => document.body.innerText.includes('incl. fees') || document.querySelector('script[type=\"application/ld+json\"]')",
+                timeout=12000,
             )
         except PwTimeout:
             pass

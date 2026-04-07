@@ -1,4 +1,4 @@
-"""Match CrowdVolt events against SeatGeek, TickPick, StubHub, and VividSeats."""
+"""Match CrowdVolt events against SeatGeek, TickPick, StubHub, VividSeats, and Gametime."""
 
 import unicodedata
 from dataclasses import dataclass
@@ -13,6 +13,7 @@ from seatgeek import SeatGeekEvent
 from stubhub import StubHubEvent
 from tickpick import TickPickEvent
 from vividseats import VividSeatsEvent
+from gametime import GametimeEvent
 
 
 @dataclass
@@ -373,6 +374,57 @@ def match_vividseats(
             source_platform="VividSeats",
             source_price=round(all_in, 2),
             source_url=vs.url,
+            crowdvolt_ask=cv_event.min_ask,
+            crowdvolt_bid=cv_event.max_bid,
+            profit_vs_ask=None,
+            profit_vs_bid=None,
+            fees_estimated=estimated,
+        )
+
+        if cv_event.min_ask is not None:
+            opp.profit_vs_ask = round(cv_event.min_ask - all_in, 2)
+        if cv_event.max_bid is not None:
+            opp.profit_vs_bid = round(cv_event.max_bid - all_in, 2)
+
+        if best is None or opp.source_price < best.source_price:
+            best = opp
+
+    return [best] if best else []
+
+
+def match_gametime(
+    cv_event: CrowdVoltEvent,
+    gt_events: list[GametimeEvent],
+) -> list[ArbitrageOpportunity]:
+    """Find the cheapest matching Gametime listing for a CrowdVolt event."""
+    best = None
+    fee_rate = config.PLATFORM_FEES.get("Gametime", 0)
+
+    for gt in gt_events:
+        if _is_junk(gt.name):
+            continue
+        score = _name_similarity(cv_event.name, gt.name)
+        if score < MATCH_THRESHOLD:
+            continue
+        if not _dates_match(cv_event.event_date, gt.event_date):
+            continue
+        if not _location_match(cv_event.city, gt.city, cv_event.venue, gt.venue):
+            continue
+        if gt.min_price is None:
+            continue
+
+        if gt.price_is_all_in:
+            all_in = gt.min_price
+            estimated = False
+        else:
+            all_in = gt.min_price * (1 + fee_rate)
+            estimated = True
+
+        opp = ArbitrageOpportunity(
+            crowdvolt_event=cv_event,
+            source_platform="Gametime",
+            source_price=round(all_in, 2),
+            source_url=gt.url,
             crowdvolt_ask=cv_event.min_ask,
             crowdvolt_bid=cv_event.max_bid,
             profit_vs_ask=None,

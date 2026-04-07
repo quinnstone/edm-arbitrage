@@ -17,7 +17,7 @@ GROUPME_GROUP_ID = os.getenv("GROUPME_GROUP_ID", "")
 GROUPME_LOOKBACK_DAYS = 7
 
 # Scrape interval in minutes
-SCAN_INTERVAL_MINUTES = 30
+SCAN_INTERVAL_MINUTES = 15
 
 # Minimum profit threshold (dollars) to trigger an alert
 MIN_PROFIT_THRESHOLD = 10
@@ -36,6 +36,7 @@ PLATFORM_FEES = {
     "StubHub": 0.45,
     "VividSeats": 0.28,
     "TickPick": 0.0,
+    "Gametime": 0.0,  # Gametime shows all-in prices (no hidden fees)
 }
 
 # Request settings

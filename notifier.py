@@ -256,13 +256,13 @@ def send_summary(
     if SEATGEEK_CLIENT_ID:
         sources.append("SeatGeek")
     if events_with_bids > 0:
-        sources.extend(["StubHub", "VividSeats"])
+        sources.extend(["StubHub", "VividSeats", "Gametime"])
     sources_str = " · ".join(sources)
 
     if events_with_bids == 0:
-        browser_note = "StubHub/VividSeats skipped (no waiting buyers)"
+        browser_note = "StubHub/VividSeats/Gametime skipped (no waiting buyers)"
     else:
-        browser_note = f"StubHub/VividSeats ran for **{events_with_bids}** events with waiting buyers"
+        browser_note = f"StubHub/VividSeats/Gametime ran for **{events_with_bids}** events with waiting buyers"
 
     payload = {
         "username": "Ticket Arb",
