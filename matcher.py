@@ -52,6 +52,15 @@ def extract_artist_name(event_name: str) -> str:
     """
     name = _strip_accents(event_name.lower())
 
+    # Strip day-of-week and qualifier parentheticals that CrowdVolt adds
+    # e.g., "Chris Lake (Saturday)" → "Chris Lake"
+    import re
+    name = re.sub(
+        r'\s*\((saturday|friday|thursday|sunday|monday|tuesday|wednesday'
+        r'|afters|2-day pass|day \d+)\)\s*$',
+        '', name, flags=re.IGNORECASE,
+    )
+
     # Truncate at venue/location delimiters — keep everything before.
     # The idx >= 5 guard prevents over-stripping short names like
     # "Wire Festival" (idx=4) down to "wire".
