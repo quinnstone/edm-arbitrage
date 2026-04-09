@@ -3,7 +3,6 @@
 import requests
 
 import config
-from groupme import GroupMeMatch, GroupMeSellMatch
 from matcher import ArbitrageOpportunity
 
 
@@ -101,139 +100,6 @@ def send_alert(opps: list[ArbitrageOpportunity]) -> bool:
         return False
 
 
-def send_groupme_alert(match: GroupMeMatch) -> bool:
-    """Send a GroupMe demand alert — visually distinct from arbitrage alerts."""
-    cv = match.crowdvolt_event
-
-    # Format the buy requests (cap at 5 to keep the embed compact)
-    request_lines = []
-    for req in match.buy_requests[:5]:
-        request_lines.append(f'**{req.user}**: "{req.text}"')
-    if len(match.buy_requests) > 5:
-        request_lines.append(f"*…and {len(match.buy_requests) - 5} more*")
-
-    # CrowdVolt price info
-    price_parts = []
-    if cv.min_ask is not None:
-        price_parts.append(f"Lowest seller: **${cv.min_ask:.0f}**")
-    if cv.max_bid is not None:
-        price_parts.append(f"Highest buyer: **${cv.max_bid:.0f}**")
-    if not price_parts:
-        price_parts.append("No active listings")
-
-    date_str = cv.event_date.strftime("%b %d, %Y") if cv.event_date else "TBD"
-    platform_str = f" · via {cv.ticket_platform}" if cv.ticket_platform else ""
-
-    fields = [
-        {
-            "name": f"Buy Requests ({len(match.buy_requests)})",
-            "value": "\n".join(request_lines),
-            "inline": False,
-        },
-        {
-            "name": "CrowdVolt Prices",
-            "value": "\n".join(price_parts),
-            "inline": True,
-        },
-        {
-            "name": "Links",
-            "value": f"[CrowdVolt]({cv.url})",
-            "inline": True,
-        },
-    ]
-
-    embed = {
-        "title": f"💬 Buy on CrowdVolt → Sell to GroupMe",
-        "description": f"**{cv.name}**\n{cv.venue} — {cv.city} — {date_str}{platform_str}",
-        "color": 0xFF9800,  # orange — distinct from green arbitrage alerts
-        "fields": fields,
-    }
-
-    payload = {"username": "Ticket Arb", "embeds": [embed]}
-
-    try:
-        resp = requests.post(
-            config.DISCORD_WEBHOOK_URL,
-            json=payload,
-            timeout=config.REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return True
-    except requests.RequestException as e:
-        print(f"[Discord] Failed to send GroupMe alert: {e}")
-        return False
-
-
-def send_groupme_sell_alert(match: GroupMeSellMatch) -> bool:
-    """Send a GroupMe supply alert — purple embed for sell-side opportunities."""
-    cv = match.crowdvolt_event
-
-    # Format the sell listings (cap at 5)
-    listing_lines = []
-    for sl in match.sell_listings[:5]:
-        price_str = f" — **${sl.price:.0f}**" if sl.price else ""
-        qty_str = f" x{sl.qty}" if sl.qty > 1 else ""
-        listing_lines.append(f'**{sl.user}**: "{sl.text}"{price_str}{qty_str}')
-    if len(match.sell_listings) > 5:
-        listing_lines.append(f"*…and {len(match.sell_listings) - 5} more*")
-
-    # CrowdVolt bid info (the buyer side)
-    price_parts = []
-    if cv.max_bid is not None:
-        price_parts.append(f"Highest buyer: **${cv.max_bid:.0f}**")
-    if cv.min_ask is not None:
-        price_parts.append(f"Lowest seller: **${cv.min_ask:.0f}**")
-
-    # Highlight spread if a seller listed a price
-    priced = [sl for sl in match.sell_listings if sl.price is not None]
-    if priced and cv.max_bid is not None:
-        cheapest = min(sl.price for sl in priced)
-        spread = cv.max_bid - cheapest
-        if spread > 0:
-            price_parts.append(f"Potential spread: **+${spread:.0f}**")
-
-    date_str = cv.event_date.strftime("%b %d, %Y") if cv.event_date else "TBD"
-    platform_str = f" · via {cv.ticket_platform}" if cv.ticket_platform else ""
-
-    fields = [
-        {
-            "name": f"GroupMe Sellers ({len(match.sell_listings)})",
-            "value": "\n".join(listing_lines),
-            "inline": False,
-        },
-        {
-            "name": "CrowdVolt Buyers",
-            "value": "\n".join(price_parts) if price_parts else "No active listings",
-            "inline": True,
-        },
-        {
-            "name": "Links",
-            "value": f"[CrowdVolt]({cv.url})",
-            "inline": True,
-        },
-    ]
-
-    embed = {
-        "title": f"🏷️ Buy from GroupMe → Sell on CrowdVolt",
-        "description": f"**{cv.name}**\n{cv.venue} — {cv.city} — {date_str}{platform_str}",
-        "color": 0x9B59B6,  # purple — distinct from green arb and orange demand
-        "fields": fields,
-    }
-
-    payload = {"username": "Ticket Arb", "embeds": [embed]}
-
-    try:
-        resp = requests.post(
-            config.DISCORD_WEBHOOK_URL,
-            json=payload,
-            timeout=config.REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return True
-    except requests.RequestException as e:
-        print(f"[Discord] Failed to send GroupMe sell alert: {e}")
-        return False
-
 
 def send_summary(
     total_events: int,
@@ -242,10 +108,6 @@ def send_summary(
     events_with_bids: int = 0,
     match_failures: int = 0,
     dice_filtered: int = 0,
-    groupme_requests: int = 0,
-    groupme_matches: int = 0,
-    groupme_sell_listings: int = 0,
-    groupme_sell_matches: int = 0,
 ) -> bool:
     """Send a scan summary to Discord."""
     asks_only = total_events - events_with_bids
@@ -277,11 +139,7 @@ def send_summary(
                 f"**{match_failures}** events with no cross-platform match\n"
                 f"**{errors}** API/scrape errors\n\n"
                 f"Sources: {sources_str}\n"
-                f"{browser_note}\n"
-                f"GroupMe: **{groupme_requests}** buy requests · "
-                f"**{groupme_matches}** matched to CrowdVolt\n"
-                f"GroupMe: **{groupme_sell_listings}** sell listings · "
-                f"**{groupme_sell_matches}** matched to CrowdVolt"
+                f"{browser_note}"
             ),
             "color": 0x5865F2,
         }],

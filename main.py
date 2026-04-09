@@ -14,7 +14,6 @@ from datetime import datetime
 import config
 import crowdvolt
 import gametime
-import groupme
 import matcher
 import notifier
 import seatgeek
@@ -35,11 +34,6 @@ def scan_once() -> int:
         print("[Scan] No CrowdVolt events with active listings — nothing to do")
         notifier.send_summary(0, 0, 0, 0, 0, dice_filtered=0)
         return 0
-
-    # Keep a copy of ALL events before filtering — GroupMe sell-side
-    # matching uses the full catalog (including DICE) since a GroupMe
-    # seller transfers the ticket to you directly.
-    all_cv_events = cv_events[:]
 
     # Filter out past events — no point scanning events that already happened
     today = datetime.now().date()
@@ -188,70 +182,13 @@ def scan_once() -> int:
         notifier.send_alert(opps)
         time.sleep(1)  # respect Discord rate limits
 
-    # Step 4: Scan GroupMe for buy requests (ALL events including DICE)
-    gm_request_count = 0
-    gm_match_count = 0
-    gm_sell_count = 0
-    gm_sell_match_count = 0
-    if config.GROUPME_TOKEN and config.GROUPME_GROUP_ID:
-        print(f"\n[GroupMe] Scanning for buy requests...")
-        gm_messages = groupme.fetch_recent_messages(
-            minutes=config.GROUPME_LOOKBACK_DAYS * 24 * 60,
-        )
-        gm_requests = groupme.parse_buy_requests(gm_messages)
-        gm_request_count = len(gm_requests)
-        print(f"[GroupMe] {gm_request_count} buy requests in "
-              f"{len(gm_messages)} messages")
-
-        if gm_requests:
-            gm_matches = groupme.match_demand(gm_requests, all_cv_events)
-            gm_match_count = len(gm_matches)
-            print(f"[GroupMe] {gm_match_count} matched to CrowdVolt events")
-
-            for gm_match in gm_matches:
-                cv = gm_match.crowdvolt_event
-                users = ", ".join(r.user for r in gm_match.buy_requests)
-                print(f"  [GroupMe] {cv.name} [{cv.ticket_platform}] ← {users}")
-                notifier.send_groupme_alert(gm_match)
-                time.sleep(1)
-
-        # Step 5: Scan GroupMe for sell listings (ALL events including DICE)
-        print(f"\n[GroupMe] Scanning for sell listings...")
-        gm_sell_listings = groupme.parse_sell_listings(gm_messages)
-        gm_sell_count = len(gm_sell_listings)
-        print(f"[GroupMe] {gm_sell_count} sell listings found")
-
-        if gm_sell_listings:
-            gm_sell_matches = groupme.match_supply(gm_sell_listings, all_cv_events)
-            gm_sell_match_count = len(gm_sell_matches)
-            print(f"[GroupMe] {gm_sell_match_count} sell matches to CrowdVolt events")
-
-            for gm_sell in gm_sell_matches:
-                cv = gm_sell.crowdvolt_event
-                sellers = ", ".join(s.user for s in gm_sell.sell_listings)
-                price_info = ""
-                priced = [s for s in gm_sell.sell_listings if s.price is not None]
-                if priced:
-                    cheapest = min(s.price for s in priced)
-                    price_info = f" (from ${cheapest:.0f})"
-                print(f"  [GroupMe] {cv.name} [{cv.ticket_platform}] ← {sellers}{price_info}")
-                notifier.send_groupme_sell_alert(gm_sell)
-                time.sleep(1)
-    else:
-        print(f"\n[GroupMe] Skipped — no token configured")
-
     notifier.send_summary(
         len(cv_events), len(by_event), errors,
         events_with_bids, match_failures,
         dice_filtered=len(dice_events),
-        groupme_requests=gm_request_count,
-        groupme_matches=gm_match_count,
-        groupme_sell_listings=gm_sell_count,
-        groupme_sell_matches=gm_sell_match_count,
     )
 
-    print(f"[Scan] Done — {len(by_event)} arbitrage alerts, "
-          f"{gm_match_count} GroupMe demand, {gm_sell_match_count} GroupMe supply")
+    print(f"[Scan] Done — {len(by_event)} arbitrage alerts")
     return len(by_event)
 
 
