@@ -87,13 +87,14 @@ HEADERS = {
 # Search sources
 # ---------------------------------------------------------------------------
 
-def _search_reddit(query: str, platform: str) -> list[dict]:
+def _search_reddit(query: str, platform: str, city: str = "") -> list[dict]:
     """Search Reddit for promo code posts related to the event."""
     results = []
+    city_term = f' "{city}"' if city else ""
     search_queries = [
-        f'"{query}" promo code',
-        f'"{query}" presale code',
-        f'"{query}" discount ticket',
+        f'"{query}"{city_term} promo code',
+        f'"{query}"{city_term} presale code',
+        f'"{query}"{city_term} discount ticket',
     ]
 
     for sq in search_queries:
@@ -141,12 +142,13 @@ def _fuzzy_contains(query: str, text: str) -> bool:
     return all(w in text for w in words)
 
 
-def _search_web(query: str, platform: str) -> list[dict]:
+def _search_web(query: str, platform: str, city: str = "") -> list[dict]:
     """Search the web via DuckDuckGo HTML for promo codes."""
     results = []
+    city_term = f' "{city}"' if city else ""
     search_queries = [
-        f'"{query}" {platform} promo code 2026',
-        f'"{query}" presale code discount',
+        f'"{query}"{city_term} {platform} promo code 2026',
+        f'"{query}"{city_term} presale code discount',
     ]
 
     for sq in search_queries:
@@ -248,7 +250,7 @@ def _search_twitter(query: str) -> list[dict]:
     return results
 
 
-def _search_ra(query: str, event_date: str = None) -> list[dict]:
+def _search_ra(query: str, event_date: str = None, city: str = "") -> list[dict]:
     """Search Resident Advisor for event pages with promo code mentions."""
     results = []
 
@@ -289,6 +291,13 @@ def _search_ra(query: str, event_date: str = None) -> list[dict]:
                     continue
             except (IndexError, TypeError):
                 pass
+
+        # City filter — skip RA results in different cities
+        if city and hit.get("areaName"):
+            ra_area = hit["areaName"].lower()
+            city_lower = city.lower()
+            if city_lower not in ra_area and ra_area not in city_lower:
+                continue
 
         event_id = hit["id"]
         gql_event = {
@@ -486,12 +495,13 @@ def scan_promos(dry_run: bool = False) -> list[PromoResult]:
 
         # Search all sources
         date_str = event.event_date.strftime("%Y-%m-%d") if event.event_date else None
+        city = event.city or ""
         raw_results = []
-        raw_results.extend(_search_reddit(event.name, platform))
+        raw_results.extend(_search_reddit(event.name, platform, city))
         raw_results.extend(_search_twitter(event.name))
-        raw_results.extend(_search_ra(event.name, date_str))
+        raw_results.extend(_search_ra(event.name, date_str, city))
         raw_results.extend(_search_promoter_sites(event.name, event.venue))
-        raw_results.extend(_search_web(event.name, platform))
+        raw_results.extend(_search_web(event.name, platform, city))
 
         # Deduplicate by URL
         seen_urls = set()
