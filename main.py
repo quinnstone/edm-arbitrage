@@ -55,6 +55,14 @@ def scan_once() -> int:
     print(f"[Scan] Filtered out {len(dice_events)} DICE-only events "
           f"({len(cv_events)} remaining)")
 
+    # Filter out seated venues — section-based pricing makes lowest
+    # third-party price meaningless vs CrowdVolt bids for specific sections.
+    SEATED_VENUES = {"barclays center", "madison square garden", "msg"}
+    seated = [e for e in cv_events if e.venue and e.venue.lower().strip() in SEATED_VENUES]
+    cv_events = [e for e in cv_events if not (e.venue and e.venue.lower().strip() in SEATED_VENUES)]
+    if seated:
+        print(f"[Scan] Filtered out {len(seated)} seated venue events (Barclays/MSG)")
+
     # Track bid availability
     events_with_bids = sum(1 for e in cv_events if e.max_bid is not None)
     events_with_asks_only = len(cv_events) - events_with_bids
