@@ -48,9 +48,12 @@ PROMO_PLATFORMS = {"DICE", "EVENTBRITE", "AXS", "TIXR", "POSH", "SEE TICKETS"}
 # Patterns that look like promo/discount codes in text
 _CODE_RE = re.compile(
     r"""(?:
-        (?:code|promo\s*code|discount\s*code|coupon|use)\s*  # keyword before
+        \b(?:code|promo\s*code|discount\s*code|coupon)\s*    # keyword before
         [:=\s"']+                                            # separator
         ([A-Z][A-Z0-9_-]{2,19})                              # the code (starts with letter)
+    |
+        \buse\s+code\s+                                      # "use code X" (requires "code" after "use")
+        ([A-Z][A-Z0-9_-]{2,19})                              # the code
     |
         ["']([A-Z][A-Z0-9_-]{3,14})["']                      # quoted code
         \s*(?:for|to\s+get|saves?|off|discount)               # keyword after
@@ -60,6 +63,7 @@ _CODE_RE = re.compile(
 
 # Common words that look like codes but aren't
 _CODE_BLACKLIST = {
+    # Common English words
     "THE", "FOR", "AND", "GET", "USE", "OFF", "CODE", "WITH", "FREE",
     "SALE", "HTTP", "HTTPS", "HTML", "JSON", "NULL", "THIS", "THAT",
     "THEY", "THEM", "WHEN", "WHAT", "WILL", "YOUR", "FROM", "HAVE",
@@ -73,6 +77,14 @@ _CODE_BLACKLIST = {
     "MAY", "NOW", "OLD", "NEW", "WAY", "DAY", "DID", "HAD", "HAS",
     "HOW", "ITS", "LET", "MAY", "OWN", "SAY", "SHE", "TOO", "WHO",
     "FUL", "DON",
+    # Music/event description words that appear near "code"/"use" keywords
+    "MUSIC", "SOUND", "SOMEONE", "RESPECT", "HOUSE", "BASS", "TECH",
+    "DANCE", "PARTY", "NIGHT", "LIVE", "SHOW", "TOUR", "OPEN",
+    "CLOSE", "DOOR", "DOORS", "FLOOR", "STAGE", "ROOM", "CLUB",
+    "EVENT", "VENUE", "ENTRY", "COVER", "RSVP", "GUEST", "LIST",
+    "TICKET", "TICKETS", "LINK", "INFO", "DETAILS", "LINEUP",
+    # Venue policy terms
+    "HARASSMENT", "ANTI-HARASSMENT", "POLICY", "SAFETY", "CONDUCT",
 }
 
 HEADERS = {
@@ -253,6 +265,7 @@ def _search_twitter(query: str) -> list[dict]:
 
 def _search_ra(query: str, event_date: str = None, city: str = "") -> list[dict]:
     """Search Resident Advisor for event pages with promo code mentions."""
+    from matcher import _name_similarity
     results = []
 
     # Step 1: Search RA for matching events
@@ -299,6 +312,13 @@ def _search_ra(query: str, event_date: str = None, city: str = "") -> list[dict]
             city_lower = city.lower()
             if city_lower not in ra_area and ra_area not in city_lower:
                 continue
+
+        # Name validation — verify the RA result actually matches our event.
+        # Without this, "Descendants: Dlala Thuzkin & Virgo Deep" matches
+        # "No Thanks @ Virgo New York" because RA's search is loose.
+        ra_name = hit.get("value", "")
+        if _name_similarity(query, ra_name) < 60:
+            continue
 
         event_id = hit["id"]
         gql_event = {
@@ -392,10 +412,21 @@ def _search_promoter_sites(query: str, venue: str) -> list[dict]:
             if query_lower not in page_text and not _fuzzy_contains(query_lower, page_text):
                 continue
 
+            # Extract text near the event mention (±500 chars) to avoid
+            # picking up venue-wide policy language like "anti-harassment code"
+            mention_idx = page_text.find(query_lower)
+            if mention_idx < 0:
+                # fuzzy match — use first word's position
+                first_word = query_lower.split()[0]
+                mention_idx = page_text.find(first_word)
+            if mention_idx < 0:
+                continue
+            nearby_text = page_text[max(0, mention_idx - 500):mention_idx + 500]
+
             # Look for promo-related content near the event mention
-            codes = _extract_codes(page_text)
+            codes = _extract_codes(nearby_text)
             has_promo = any(
-                kw in page_text
+                kw in nearby_text
                 for kw in ["promo", "discount", "code", "early bird",
                            "guest list", "guestlist", "reduced", "% off",
                            "free before", "no cover", "rsvp"]
@@ -452,7 +483,7 @@ def _extract_codes(text: str) -> list[str]:
     """Pull promo-code-looking strings from text."""
     codes = set()
     for match in _CODE_RE.finditer(text):
-        code = match.group(1) or match.group(2)
+        code = match.group(1) or match.group(2) or match.group(3)
         if code and code.upper() not in _CODE_BLACKLIST:
             codes.add(code.upper())
     return sorted(codes)
