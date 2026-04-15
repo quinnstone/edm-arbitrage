@@ -48,15 +48,12 @@ PROMO_PLATFORMS = {"DICE", "EVENTBRITE", "AXS", "TIXR", "POSH", "SEE TICKETS"}
 # Patterns that look like promo/discount codes in text
 _CODE_RE = re.compile(
     r"""(?:
-        \b(?:code|promo\s*code|discount\s*code|coupon)\s*    # keyword before
-        [:=\s"']+                                            # separator
-        ([A-Z][A-Z0-9_-]{2,19})                              # the code (starts with letter)
+        \b(?:promo\s*code|discount\s*code|use\s+code|coupon|code|use)  # keyword (\b prevents "house" matching "use")
+        \s*[:=\s"']+                                                    # separator
+        ([A-Z][A-Z0-9_-]{2,19})                                        # the code
     |
-        \buse\s+code\s+                                      # "use code X" (requires "code" after "use")
-        ([A-Z][A-Z0-9_-]{2,19})                              # the code
-    |
-        ["']([A-Z][A-Z0-9_-]{3,14})["']                      # quoted code
-        \s*(?:for|to\s+get|saves?|off|discount)               # keyword after
+        ["']([A-Z][A-Z0-9_-]{3,14})["']                                # quoted code
+        \s*(?:for|to\s+get|saves?|off|discount)                         # keyword after
     )""",
     re.IGNORECASE | re.VERBOSE,
 )
@@ -85,6 +82,8 @@ _CODE_BLACKLIST = {
     "TICKET", "TICKETS", "LINK", "INFO", "DETAILS", "LINEUP",
     # Venue policy terms
     "HARASSMENT", "ANTI-HARASSMENT", "POLICY", "SAFETY", "CONDUCT",
+    # Label words that appear as false codes
+    "PRESALE", "PRE-SALE",
 }
 
 HEADERS = {
@@ -355,9 +354,8 @@ def _search_ra(query: str, event_date: str = None, city: str = "") -> list[dict]
         codes = _extract_codes(combined)
         has_promo = any(
             kw in combined.lower()
-            for kw in ["promo", "discount", "code", "coupon", "early bird",
-                        "guest list", "guestlist", "reduced", "% off",
-                        "free before", "no cover", "rsvp"]
+            for kw in ["promo code", "discount code", "coupon code",
+                        "use code", "% off", "early bird"]
         )
 
         # Also check for embedded codes in ticket URLs (e.g., ?code=XYZ)
@@ -427,9 +425,8 @@ def _search_promoter_sites(query: str, venue: str) -> list[dict]:
             codes = _extract_codes(nearby_text)
             has_promo = any(
                 kw in nearby_text
-                for kw in ["promo", "discount", "code", "early bird",
-                           "guest list", "guestlist", "reduced", "% off",
-                           "free before", "no cover", "rsvp"]
+                for kw in ["promo code", "discount code", "coupon code",
+                           "use code", "% off", "early bird"]
             )
 
             if codes or has_promo:
@@ -483,7 +480,7 @@ def _extract_codes(text: str) -> list[str]:
     """Pull promo-code-looking strings from text."""
     codes = set()
     for match in _CODE_RE.finditer(text):
-        code = match.group(1) or match.group(2) or match.group(3)
+        code = match.group(1) or match.group(2)
         if code and code.upper() not in _CODE_BLACKLIST:
             codes.add(code.upper())
     return sorted(codes)
@@ -550,12 +547,11 @@ def scan_promos(dry_run: bool = False, cv_events: list = None) -> list[PromoResu
             codes = r.get("codes", []) or _extract_codes(combined_text)
 
             # Even without extracted codes, flag results that mention
-            # promo/discount in context of this event
+            # specific promo language (not just "code" or "free" alone)
             has_promo_mention = any(
                 kw in combined_text.lower()
-                for kw in ["promo", "discount", "code", "coupon", "presale",
-                           "early bird", "free entry", "guest list", "guestlist",
-                           "reduced", "% off"]
+                for kw in ["promo code", "discount code", "coupon code",
+                           "use code", "% off", "early bird"]
             )
 
             if codes or has_promo_mention:
