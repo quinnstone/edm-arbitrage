@@ -76,21 +76,28 @@ def scan_once() -> int:
         ask_str = f"${cv_event.min_ask:.0f}" if cv_event.min_ask else "none"
         print(f"\n[Match] {cv_event.name} (lowest seller: {ask_str}, highest buyer: ${cv_event.max_bid:.0f})")
 
-        # Extract clean artist name for better search results
-        query = matcher.extract_artist_name(cv_event.name)
-        date_str = None
-        if cv_event.event_date:
-            date_str = cv_event.event_date.strftime("%Y-%m-%d")
+        # Generate candidate search queries — multi-artist names produce
+        # multiple queries (featured artist first, promoter second).
+        queries = matcher.search_queries(cv_event.name)
 
-        print(f"  [Query] \"{query}\" (from \"{cv_event.name}\")")
+        # Use localized date for search filters so late-night ET shows
+        # don't search the wrong calendar day (CrowdVolt stores UTC).
+        local_dt = matcher._localize_cv_date(cv_event)
+        date_str = local_dt.strftime("%Y-%m-%d") if local_dt else None
+
+        print(f"  [Query] {queries} (from \"{cv_event.name}\") date={date_str}")
 
         event_matched = False
 
         # --- HTTP-based sources (fast) ---
 
-        # Search SeatGeek
+        # Search SeatGeek — try each query until we get results
         try:
-            sg_results = seatgeek.search_events(query, date_str)
+            sg_results = []
+            for q in queries:
+                sg_results = seatgeek.search_events(q, date_str)
+                if sg_results:
+                    break
             if sg_results:
                 sg_opps = matcher.match_seatgeek(cv_event, sg_results)
                 if sg_opps:
@@ -102,9 +109,13 @@ def scan_once() -> int:
             print(f"  [SeatGeek] Error: {e}")
             errors += 1
 
-        # Search TickPick (no API key needed)
+        # Search TickPick — try each query until we get results
         try:
-            tp_results = tickpick.search_events(query, date_str)
+            tp_results = []
+            for q in queries:
+                tp_results = tickpick.search_events(q, date_str)
+                if tp_results:
+                    break
             if tp_results:
                 tp_opps = matcher.match_tickpick(cv_event, tp_results)
                 if tp_opps:
@@ -118,9 +129,13 @@ def scan_once() -> int:
 
         # --- Playwright-based sources (slower, headless browser) ---
 
-        # Search StubHub
+        # Search StubHub — try each query until we get results
         try:
-            sh_results = stubhub.search_events(query, date_str)
+            sh_results = []
+            for q in queries:
+                sh_results = stubhub.search_events(q, date_str)
+                if sh_results:
+                    break
             if sh_results:
                 sh_opps = matcher.match_stubhub(cv_event, sh_results)
                 if sh_opps:
@@ -132,9 +147,13 @@ def scan_once() -> int:
             print(f"  [StubHub] Error: {e}")
             errors += 1
 
-        # Search VividSeats
+        # Search VividSeats — try each query until we get results
         try:
-            vs_results = vividseats.search_events(query, date_str)
+            vs_results = []
+            for q in queries:
+                vs_results = vividseats.search_events(q, date_str)
+                if vs_results:
+                    break
             if vs_results:
                 vs_opps = matcher.match_vividseats(cv_event, vs_results)
                 if vs_opps:
@@ -146,9 +165,13 @@ def scan_once() -> int:
             print(f"  [VividSeats] Error: {e}")
             errors += 1
 
-        # Search Gametime
+        # Search Gametime — try each query until we get results
         try:
-            gt_results = gametime.search_events(query, date_str)
+            gt_results = []
+            for q in queries:
+                gt_results = gametime.search_events(q, date_str)
+                if gt_results:
+                    break
             if gt_results:
                 gt_opps = matcher.match_gametime(cv_event, gt_results)
                 if gt_opps:
@@ -247,9 +270,10 @@ def test_single():
     for bid in event.bids:
         print(f"  Buyer: {bid.user} — ${bid.price} (${bid.all_in_price} all-in) x{bid.qty} [{bid.ticket_type}]")
 
-    # Extract query
-    query = matcher.extract_artist_name(event.name)
-    print(f"\n[Test] Search query: \"{query}\" (from \"{event.name}\")")
+    # Extract search queries
+    queries = matcher.search_queries(event.name)
+    print(f"\n[Test] Search queries: {queries} (from \"{event.name}\")")
+    query = queries[0]
 
     # SeatGeek
     print(f"\n[Test] Searching SeatGeek for '{query}'...")

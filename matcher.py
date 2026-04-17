@@ -97,6 +97,73 @@ def extract_artist_name(event_name: str) -> str:
     return name.strip()
 
 
+def search_queries(event_name: str) -> list[str]:
+    """Generate candidate search queries for an event name.
+
+    Unlike extract_artist_name (which aggressively strips for fuzzy matching),
+    this preserves featured artists so platform searches actually find them.
+
+    Returns queries ordered best-first. Callers should try each until one
+    returns results.
+
+    Examples:
+        "Factory 93 Presents: Seth Troxler" → ["seth troxler", "factory 93"]
+        "Teksupport: Adriatique"            → ["adriatique", "teksupport"]
+        "Chris Lake + Fisher"               → ["chris lake fisher", "chris lake"]
+        "Chris Lake (Saturday)"             → ["chris lake"]
+        "Bob Moses"                         → ["bob moses"]
+    """
+    raw = _strip_accents(event_name.lower())
+
+    # Strip parentheticals (day-of-week, age qualifiers)
+    raw = re.sub(
+        r'\s*\((saturday|friday|thursday|sunday|monday|tuesday|wednesday'
+        r'|afters|2-day pass|day \d+'
+        r'|\d+\+(?:\s*event)?|all\s*ages)\)\s*',
+        '', raw, flags=re.IGNORECASE,
+    )
+
+    queries = []
+
+    # Split on "presents" or ":" — right side is usually the featured artist
+    split = re.split(r'\s+presents\s*:?\s*|\s*:\s+', raw, maxsplit=1)
+    if len(split) == 2:
+        left, right = split
+        right_clean = extract_artist_name(right)
+        left_clean = extract_artist_name(left)
+        # Featured artist (right side) is the better search query
+        if right_clean and len(right_clean) >= 3:
+            queries.append(right_clean)
+        if left_clean and left_clean != right_clean:
+            queries.append(left_clean)
+    else:
+        # No promoter/featured split — check for multi-artist "+"/"&"
+        parts = re.split(r'\s*[+&]\s+', raw)
+        if len(parts) > 1:
+            # Try full combined query first (some platforms handle it well),
+            # then try individual artists
+            combined = " ".join(extract_artist_name(p) for p in parts if extract_artist_name(p))
+            if combined:
+                queries.append(combined)
+            for p in parts:
+                cleaned = extract_artist_name(p)
+                if cleaned and cleaned not in queries:
+                    queries.append(cleaned)
+        else:
+            # Simple single-artist name
+            queries.append(extract_artist_name(raw))
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for q in queries:
+        if q and q not in seen:
+            seen.add(q)
+            unique.append(q)
+
+    return unique if unique else [extract_artist_name(event_name)]
+
+
 # Map CrowdVolt cities to their local timezone for date normalization.
 # CrowdVolt stores event times in UTC — a 10pm ET show becomes 2am UTC
 # the next day. Converting to local time lets us compare calendar dates

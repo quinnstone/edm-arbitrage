@@ -17,7 +17,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -99,50 +99,108 @@ HEADERS = {
 # Search sources
 # ---------------------------------------------------------------------------
 
+
+# Subreddits where EDM promo codes are commonly shared, mapped by city
+CITY_SUBREDDITS = {
+    "new york": ["avesNYC", "NYCEvents", "Brooklyn"],
+    "los angeles": ["avesLA", "LosAngeles"],
+    "chicago": ["chicagoEDM", "chicago"],
+    "miami": ["MiamiMusic", "miami"],
+}
+# General EDM subs — always searched
+GENERAL_SUBREDDITS = ["aves", "EDM", "Techno", "House"]
+
+
 def _search_reddit(query: str, platform: str, city: str = "") -> list[dict]:
-    """Search Reddit for promo code posts related to the event."""
+    """Search Reddit for promo code posts — both site-wide and targeted subs."""
     results = []
     city_term = f' "{city}"' if city else ""
-    search_queries = [
+    cutoff = time.time() - (14 * 24 * 60 * 60)  # 2 weeks ago
+
+    # Build list of search queries for site-wide search
+    site_wide_queries = [
         f'"{query}"{city_term} promo code',
         f'"{query}"{city_term} presale code',
         f'"{query}"{city_term} discount ticket',
     ]
 
-    for sq in search_queries:
-        url = "https://www.reddit.com/search.json"
-        params = {
-            "q": sq,
-            "sort": "new",
-            "t": "month",
-            "limit": 5,
-        }
-        try:
-            resp = requests.get(
-                url, params=params, headers={**HEADERS, "Accept": "application/json"},
-                timeout=config.REQUEST_TIMEOUT,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                for post in data.get("data", {}).get("children", []):
-                    d = post.get("data", {})
-                    title = d.get("title", "")
-                    body = d.get("selftext", "")[:300]
-                    combined = f"{title} {body}".lower()
-                    # Only keep results that mention the event name
-                    query_lower = query.lower()
-                    if query_lower in combined or _fuzzy_contains(query_lower, combined):
-                        results.append({
-                            "source": "Reddit",
-                            "title": title,
-                            "snippet": body,
-                            "url": f"https://reddit.com{d.get('permalink', '')}",
-                        })
-        except requests.RequestException:
-            pass
-        time.sleep(1)
+    # Build list of targeted subreddits based on city
+    city_lower = city.lower().strip() if city else ""
+    targeted_subs = list(GENERAL_SUBREDDITS)
+    for city_key, subs in CITY_SUBREDDITS.items():
+        if city_lower and (city_key in city_lower or city_lower in city_key):
+            targeted_subs.extend(subs)
+            break
+
+    # 1) Site-wide search
+    for sq in site_wide_queries:
+        _reddit_search(sq, results, cutoff, query)
+
+    # 2) Targeted subreddit search — just the artist name within each sub,
+    #    broader than site-wide since people mention codes without saying "promo"
+    for sub in targeted_subs:
+        _reddit_search(
+            f'"{query}"',
+            results, cutoff, query,
+            subreddit=sub,
+        )
 
     return results
+
+
+def _reddit_search(
+    search_query: str,
+    results: list[dict],
+    cutoff: float,
+    event_query: str,
+    subreddit: str = "",
+) -> None:
+    """Execute a single Reddit search and append matching posts to results."""
+    if subreddit:
+        url = f"https://www.reddit.com/r/{subreddit}/search.json"
+        params = {
+            "q": search_query,
+            "sort": "new",
+            "t": "month",
+            "limit": 10,
+            "restrict_sr": "on",
+        }
+    else:
+        url = "https://www.reddit.com/search.json"
+        params = {
+            "q": search_query,
+            "sort": "new",
+            "t": "month",
+            "limit": 10,
+        }
+
+    try:
+        resp = requests.get(
+            url, params=params, headers={**HEADERS, "Accept": "application/json"},
+            timeout=config.REQUEST_TIMEOUT,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            for post in data.get("data", {}).get("children", []):
+                d = post.get("data", {})
+                created = d.get("created_utc", 0)
+                if created < cutoff:
+                    continue
+                title = d.get("title", "")
+                body = d.get("selftext", "")[:500]
+                combined = f"{title} {body}".lower()
+                query_lower = event_query.lower()
+                if query_lower in combined or _fuzzy_contains(query_lower, combined):
+                    source = f"r/{subreddit}" if subreddit else "Reddit"
+                    results.append({
+                        "source": source,
+                        "title": title,
+                        "snippet": body[:300],
+                        "url": f"https://reddit.com{d.get('permalink', '')}",
+                    })
+    except requests.RequestException:
+        pass
+    time.sleep(0.8)
 
 
 def _fuzzy_contains(query: str, text: str) -> bool:
@@ -163,12 +221,13 @@ def _search_web(query: str, platform: str, city: str = "") -> list[dict]:
         f'"{query}"{city_term} presale code discount',
     ]
 
+    df = _ddg_date_range()
     for sq in search_queries:
         url = "https://html.duckduckgo.com/html/"
         try:
             resp = requests.post(
                 url,
-                data={"q": sq},
+                data={"q": sq, "df": df},
                 headers=HEADERS,
                 timeout=config.REQUEST_TIMEOUT,
             )
@@ -221,19 +280,27 @@ PROMOTER_SITES = [
 ]
 
 
+def _ddg_date_range() -> str:
+    """Return a DuckDuckGo date filter string for the last 2 weeks."""
+    end = datetime.now()
+    start = end - timedelta(days=14)
+    return f"{start.strftime('%Y-%m-%d')}..{end.strftime('%Y-%m-%d')}"
+
+
 def _search_twitter(query: str) -> list[dict]:
-    """Search Twitter/X posts via DuckDuckGo site-scoped search."""
+    """Search Twitter/X posts via DuckDuckGo site-scoped search (last 2 weeks)."""
     results = []
     search_queries = [
         f'site:x.com "{query}" code OR promo OR discount OR guestlist',
         f'site:twitter.com "{query}" code OR promo OR discount',
     ]
 
+    df = _ddg_date_range()
     for sq in search_queries:
         url = "https://html.duckduckgo.com/html/"
         try:
             resp = requests.post(
-                url, data={"q": sq}, headers=HEADERS, timeout=10,
+                url, data={"q": sq, "df": df}, headers=HEADERS, timeout=10,
             )
             if resp.status_code != 200:
                 continue
@@ -442,6 +509,7 @@ def _search_promoter_sites(query: str, venue: str) -> list[dict]:
         time.sleep(0.5)
 
     # Also search for venue/promoter Twitter posts about this event
+    df = _ddg_date_range()
     for site in PROMOTER_SITES:
         twitter_handle = site.get("twitter")
         if not twitter_handle:
@@ -450,7 +518,7 @@ def _search_promoter_sites(query: str, venue: str) -> list[dict]:
         sq = f'site:x.com from:{twitter_handle} "{query_lower}" code OR promo OR discount OR guestlist'
         url = "https://html.duckduckgo.com/html/"
         try:
-            resp = requests.post(url, data={"q": sq}, headers=HEADERS, timeout=10)
+            resp = requests.post(url, data={"q": sq, "df": df}, headers=HEADERS, timeout=10)
             if resp.status_code != 200:
                 continue
 
@@ -474,6 +542,238 @@ def _search_promoter_sites(query: str, venue: str) -> list[dict]:
 
     return results
 
+
+def _search_eventbrite(query: str, city: str = "") -> list[dict]:
+    """Search Eventbrite for event pages with promo code fields or discounts.
+
+    Eventbrite event pages sometimes show promo code entry fields,
+    early bird pricing, or discount tiers. We search via DuckDuckGo
+    to find the Eventbrite listing, then check the page for promo signals.
+    """
+    results = []
+    city_term = f' "{city}"' if city else ""
+    df = _ddg_date_range()
+
+    sq = f'site:eventbrite.com "{query}"{city_term}'
+    try:
+        resp = requests.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": sq, "df": df},
+            headers=HEADERS, timeout=10,
+        )
+        if resp.status_code != 200:
+            return results
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for result in soup.select(".result")[:3]:
+            title_el = result.select_one(".result__title a")
+            if not title_el:
+                continue
+            href = title_el.get("href", "")
+            if "eventbrite.com/e/" not in href:
+                continue
+
+            # Fetch the actual Eventbrite event page
+            try:
+                page_resp = requests.get(
+                    href, headers=HEADERS, timeout=10, allow_redirects=True,
+                )
+                if page_resp.status_code != 200:
+                    continue
+            except requests.RequestException:
+                continue
+
+            page_text = page_resp.text.lower()
+
+            # Look for promo signals on the Eventbrite page:
+            # - "enter promo code" / "promo code" input fields
+            # - "early bird" pricing tiers
+            # - "discount" in ticket type names
+            # - Embedded JSON with promo/discount data
+            codes = _extract_codes(page_resp.text)
+
+            promo_signals = [
+                "promo code", "promotional code", "discount code",
+                "enter code", "early bird", "earlybird",
+                "% off", "discount ticket",
+            ]
+            has_promo = any(s in page_text for s in promo_signals)
+
+            # Also check for structured promo data in JSON-LD
+            ld_blocks = re.findall(
+                r'<script type="application/ld\+json">(.*?)</script>',
+                page_resp.text, re.DOTALL,
+            )
+            for block in ld_blocks:
+                try:
+                    ld = json.loads(block)
+                    offers = ld.get("offers", [])
+                    if isinstance(offers, list):
+                        for offer in offers:
+                            offer_name = str(offer.get("name", "")).lower()
+                            if any(kw in offer_name for kw in ["early bird", "discount", "promo"]):
+                                has_promo = True
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            if codes or has_promo:
+                title = title_el.get_text(strip=True)
+                results.append({
+                    "source": "Eventbrite",
+                    "title": title[:100],
+                    "snippet": "Promo code field or discount tier found on event page",
+                    "url": href,
+                    "codes": codes,
+                })
+
+            time.sleep(0.5)
+    except requests.RequestException:
+        pass
+
+    return results
+
+
+def _search_dice(query: str, city: str = "") -> list[dict]:
+    """Search for DICE event pages with promo codes or discounted tiers.
+
+    DICE doesn't have a public API, but event pages are HTML-rendered
+    and sometimes contain early bird pricing, promo code entry, or
+    tiered pricing visible in the page source.
+    """
+    results = []
+    city_term = f' "{city}"' if city else ""
+    df = _ddg_date_range()
+
+    sq = f'site:dice.fm "{query}"{city_term}'
+    try:
+        resp = requests.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": sq, "df": df},
+            headers=HEADERS, timeout=10,
+        )
+        if resp.status_code != 200:
+            return results
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for result in soup.select(".result")[:3]:
+            title_el = result.select_one(".result__title a")
+            if not title_el:
+                continue
+            href = title_el.get("href", "")
+            if "dice.fm" not in href:
+                continue
+
+            # Fetch the DICE event page
+            try:
+                page_resp = requests.get(
+                    href, headers=HEADERS, timeout=10, allow_redirects=True,
+                )
+                if page_resp.status_code != 200:
+                    continue
+            except requests.RequestException:
+                continue
+
+            page_text = page_resp.text.lower()
+            codes = _extract_codes(page_resp.text)
+
+            promo_signals = [
+                "promo code", "promotional code", "discount code",
+                "enter code", "early bird", "earlybird",
+                "% off", "discount", "reduced price",
+                "unlock", "access code",
+            ]
+            has_promo = any(s in page_text for s in promo_signals)
+
+            # Check for JSON data embedded in DICE pages (Next.js)
+            next_match = re.search(
+                r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+                page_resp.text, re.DOTALL,
+            )
+            if next_match:
+                try:
+                    next_data = json.loads(next_match.group(1))
+                    next_str = json.dumps(next_data).lower()
+                    if any(kw in next_str for kw in ["promo", "discount", "early bird", "access_code"]):
+                        has_promo = True
+                    # Extract any code-like strings from the structured data
+                    codes.extend(_extract_codes(json.dumps(next_data)))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            if codes or has_promo:
+                title = title_el.get_text(strip=True)
+                results.append({
+                    "source": "DICE",
+                    "title": title[:100],
+                    "snippet": "Promo/discount signal found on DICE event page",
+                    "url": href,
+                    "codes": codes,
+                })
+
+            time.sleep(0.5)
+    except requests.RequestException:
+        pass
+
+    return results
+
+
+def _search_linktree(query: str, venue: str) -> list[dict]:
+    """Check promoter Linktree pages for ticket links with promo codes.
+
+    Many promoters use Linktree as their bio link, and ticket links
+    there sometimes contain embedded promo codes (?code=XYZ).
+    """
+    results = []
+    venue_lower = venue.lower() if venue else ""
+
+    for site in PROMOTER_SITES:
+        site_name_lower = site["name"].lower()
+        if venue_lower and site_name_lower not in venue_lower and venue_lower not in site_name_lower:
+            continue
+
+        # Try common Linktree URL patterns
+        handle = site.get("twitter", site["name"].lower().replace(" ", ""))
+        linktree_url = f"https://linktr.ee/{handle}"
+
+        try:
+            resp = requests.get(
+                linktree_url, headers=HEADERS, timeout=10, allow_redirects=True,
+            )
+            if resp.status_code != 200:
+                continue
+
+            page_text = resp.text.lower()
+            query_lower = query.lower()
+
+            # Check if event is mentioned
+            if query_lower not in page_text and not _fuzzy_contains(query_lower, page_text):
+                continue
+
+            # Look for ticket links with embedded codes
+            links = re.findall(r'href="([^"]*(?:dice\.fm|eventbrite\.com|tixr\.com|posh\.vip)[^"]*)"', resp.text, re.IGNORECASE)
+            codes = []
+            for link in links:
+                code_match = re.search(r'[?&](?:code|promo|discount)=([A-Za-z0-9_-]+)', link)
+                if code_match and code_match.group(1).upper() not in _CODE_BLACKLIST:
+                    codes.append(code_match.group(1).upper())
+
+            # Also check page text for promo mentions
+            page_codes = _extract_codes(resp.text)
+            codes.extend(c for c in page_codes if c not in codes)
+
+            if codes:
+                results.append({
+                    "source": f"Linktr.ee/{handle}",
+                    "title": f"{site['name']} Linktree — ticket link with code",
+                    "snippet": "",
+                    "url": linktree_url,
+                    "codes": codes,
+                })
+        except requests.RequestException:
+            continue
+        time.sleep(0.5)
+
+    return results
 
 
 def _extract_codes(text: str) -> list[str]:
@@ -505,7 +805,6 @@ def scan_promos(dry_run: bool = False, cv_events: list = None) -> list[PromoResu
 
     # Only scan events with active bids on platforms that support promo codes,
     # happening within the next 14 days (promo codes are shared close to event)
-    from datetime import timedelta
     horizon = datetime.now() + timedelta(days=14)
     eligible = [
         e for e in cv_events
@@ -531,7 +830,13 @@ def scan_promos(dry_run: bool = False, cv_events: list = None) -> list[PromoResu
         raw_results.extend(_search_twitter(event.name))
         raw_results.extend(_search_ra(event.name, date_str, city))
         raw_results.extend(_search_promoter_sites(event.name, event.venue))
+        raw_results.extend(_search_linktree(event.name, event.venue))
         raw_results.extend(_search_web(event.name, platform, city))
+        # Check ticketing platform pages directly for promo fields
+        if platform.upper() == "EVENTBRITE":
+            raw_results.extend(_search_eventbrite(event.name, city))
+        elif platform.upper() == "DICE":
+            raw_results.extend(_search_dice(event.name, city))
 
         # Deduplicate by URL
         seen_urls = set()
