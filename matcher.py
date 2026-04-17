@@ -1,9 +1,11 @@
 """Match CrowdVolt events against SeatGeek, TickPick, StubHub, VividSeats, and Gametime."""
 
+import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from thefuzz import fuzz
 
@@ -54,10 +56,11 @@ def extract_artist_name(event_name: str) -> str:
 
     # Strip day-of-week and qualifier parentheticals that CrowdVolt adds
     # e.g., "Chris Lake (Saturday)" → "Chris Lake"
-    import re
+    # Also strip age qualifiers: "(21+ Event)", "(18+)", "(All Ages)"
     name = re.sub(
         r'\s*\((saturday|friday|thursday|sunday|monday|tuesday|wednesday'
-        r'|afters|2-day pass|day \d+)\)\s*$',
+        r'|afters|2-day pass|day \d+'
+        r'|\d+\+(?:\s*event)?|all\s*ages)\)\s*',
         '', name, flags=re.IGNORECASE,
     )
 
@@ -94,12 +97,66 @@ def extract_artist_name(event_name: str) -> str:
     return name.strip()
 
 
-def _dates_match(dt1, dt2, tolerance_days: int = 1) -> bool:
-    """Check if two dates are within tolerance of each other.
+# Map CrowdVolt cities to their local timezone for date normalization.
+# CrowdVolt stores event times in UTC — a 10pm ET show becomes 2am UTC
+# the next day. Converting to local time lets us compare calendar dates
+# with zero tolerance, fixing consecutive-night cross-matching.
+CITY_TIMEZONES = {
+    "new york": ZoneInfo("America/New_York"),
+    "brooklyn": ZoneInfo("America/New_York"),
+    "chicago": ZoneInfo("America/Chicago"),
+    "los angeles": ZoneInfo("America/Los_Angeles"),
+    "miami": ZoneInfo("America/New_York"),
+    "las vegas": ZoneInfo("America/Los_Angeles"),
+    "denver": ZoneInfo("America/Denver"),
+    "phoenix": ZoneInfo("America/Phoenix"),
+    "nashville": ZoneInfo("America/Chicago"),
+    "atlanta": ZoneInfo("America/New_York"),
+    "detroit": ZoneInfo("America/Detroit"),
+    "seattle": ZoneInfo("America/Los_Angeles"),
+    "boston": ZoneInfo("America/New_York"),
+    "houston": ZoneInfo("America/Chicago"),
+    "dallas": ZoneInfo("America/Chicago"),
+    "philadelphia": ZoneInfo("America/New_York"),
+    "washington": ZoneInfo("America/New_York"),
+    "minneapolis": ZoneInfo("America/Chicago"),
+    "san francisco": ZoneInfo("America/Los_Angeles"),
+    "austin": ZoneInfo("America/Chicago"),
+    "portland": ZoneInfo("America/Los_Angeles"),
+    "tampa": ZoneInfo("America/New_York"),
+}
 
-    Compares calendar dates (not full datetimes) to avoid timezone
-    artifacts — CrowdVolt stores UTC, so a 10pm ET show becomes
-    2am UTC the next day.
+
+def _localize_cv_date(cv_event) -> Optional[datetime]:
+    """Convert a CrowdVolt event's UTC datetime to local time.
+
+    Returns the datetime shifted to the show's local timezone so that
+    calendar-date comparison works correctly. Falls back to UTC if
+    the city isn't mapped.
+    """
+    dt = cv_event.event_date
+    if dt is None:
+        return None
+
+    city_key = _normalize_city(cv_event.city) if cv_event.city else ""
+    tz = CITY_TIMEZONES.get(city_key)
+
+    if tz is None:
+        return dt  # unknown city — return as-is
+
+    # Ensure the datetime is timezone-aware before converting
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    return dt.astimezone(tz)
+
+
+def _dates_match(dt1, dt2, tolerance_days: int = 0) -> bool:
+    """Check if two dates fall on the same calendar date.
+
+    CrowdVolt dates should be pre-localized via _localize_cv_date()
+    so we can compare with zero tolerance. Other platforms already
+    store local times.
 
     Returns True if either date is missing (allows match through).
     """
@@ -110,13 +167,51 @@ def _dates_match(dt1, dt2, tolerance_days: int = 1) -> bool:
     return abs((d1 - d2).days) <= tolerance_days
 
 
+def _extract_segments(name: str) -> list[str]:
+    """Split a multi-artist event name into individual artist segments.
+
+    Works on the raw name BEFORE extract_artist_name truncation, so that
+    "Factory 93 Presents: Seth Troxler" splits into segments before
+    " presents" truncation would discard "Seth Troxler".
+
+    Handles patterns like:
+    - "Head Trip: Calvin Harris & Swedish House Mafia" → ["head trip", "calvin harris", "swedish house mafia"]
+    - "Factory 93 Presents: Seth Troxler" → ["factory 93", "seth troxler"]
+    - "Chris Lake + Fisher" → ["chris lake", "fisher"]
+    """
+    raw = _strip_accents(name.lower())
+    # Strip parentheticals first (age qualifiers, day-of-week)
+    raw = re.sub(
+        r'\s*\((saturday|friday|thursday|sunday|monday|tuesday|wednesday'
+        r'|afters|2-day pass|day \d+'
+        r'|\d+\+(?:\s*event)?|all\s*ages)\)\s*',
+        '', raw, flags=re.IGNORECASE,
+    )
+    # Split on multi-artist delimiters including "presents:"
+    parts = re.split(r'\s*[+&]\s*|\s*:\s*|\s+(?:b2b|x|vs\.?|presents)\s+', raw)
+    # Clean each segment through extract_artist_name for suffix stripping
+    segments = []
+    for p in parts:
+        cleaned = extract_artist_name(p)
+        if cleaned:
+            segments.append(cleaned)
+    return segments
+
 
 def _name_similarity(name1: str, name2: str) -> int:
-    """Score 0-100 for how similar two event/artist names are."""
+    """Score 0-100 for how similar two event/artist names are.
+
+    For multi-artist names (containing ":", "+", "&"), also tries matching
+    individual segments. For short names (< 8 chars), requires exact match
+    to prevent "Baby J" matching "Baby Jane".
+    """
     a = extract_artist_name(name1)
     b = extract_artist_name(name2)
+
+    shorter = min(len(a), len(b))
     base_scores = [fuzz.ratio(a, b), fuzz.token_sort_ratio(a, b)]
     best_base = max(base_scores)
+
     # partial_ratio inflates scores when one name is very short
     # (e.g. "ale" scores 100 against "alex") — only trust it
     # when the shorter name is long enough to be distinctive.
@@ -124,12 +219,25 @@ def _name_similarity(name1: str, name2: str) -> int:
         partial = fuzz.partial_ratio(a, b)
         # Only trust partial_ratio when it's within 25 points of the
         # base scores.  A big gap means partial matched a substring
-        # but the names are otherwise very different (e.g. "baby jane"
-        # partially matching "baby j & belters only": partial=80 but
-        # ratio=47).
+        # but the names are otherwise very different.
         if partial - best_base <= 25:
             base_scores.append(partial)
-    return max(base_scores)
+
+    best = max(base_scores)
+
+    # If the full-name comparison fails, try individual segments.
+    # "Factory 93 Presents: Seth Troxler" full-name vs "Seth Troxler"
+    # scores poorly, but the segment "seth troxler" matches perfectly.
+    if best < MATCH_THRESHOLD:
+        for seg_a in _extract_segments(name1):
+            for seg_b in _extract_segments(name2):
+                if len(seg_a) < 3 or len(seg_b) < 3:
+                    continue
+                seg_score = max(fuzz.ratio(seg_a, seg_b), fuzz.token_sort_ratio(seg_a, seg_b))
+                if seg_score > best:
+                    best = seg_score
+
+    return best
 
 
 MATCH_THRESHOLD = 70  # minimum fuzzy score to consider a match
@@ -212,6 +320,7 @@ def match_seatgeek(
     """Find the cheapest matching SeatGeek listing for a CrowdVolt event."""
     best = None
     fee_rate = config.PLATFORM_FEES.get("SeatGeek", 0)
+    cv_local_date = _localize_cv_date(cv_event)
 
     for sg in sg_events:
         if _is_junk(sg.title):
@@ -219,7 +328,7 @@ def match_seatgeek(
         score = _name_similarity(cv_event.name, sg.title)
         if score < MATCH_THRESHOLD:
             continue
-        if not _dates_match(cv_event.event_date, sg.event_date):
+        if not _dates_match(cv_local_date, sg.event_date):
             continue
         if not _location_match(cv_event.city, sg.city, cv_event.venue, sg.venue):
             continue
@@ -258,6 +367,7 @@ def match_tickpick(
     """Find the cheapest matching TickPick listing for a CrowdVolt event."""
     best = None
     fee_rate = config.PLATFORM_FEES.get("TickPick", 0)
+    cv_local_date = _localize_cv_date(cv_event)
 
     for tp in tp_events:
         if _is_junk(tp.name):
@@ -265,7 +375,7 @@ def match_tickpick(
         score = _name_similarity(cv_event.name, tp.name)
         if score < MATCH_THRESHOLD:
             continue
-        if not _dates_match(cv_event.event_date, tp.event_date):
+        if not _dates_match(cv_local_date, tp.event_date):
             continue
         if not _location_match(cv_event.city, tp.city, cv_event.venue, tp.venue):
             continue
@@ -304,6 +414,7 @@ def match_stubhub(
     """Find the cheapest matching StubHub listing for a CrowdVolt event."""
     best = None
     fee_rate = config.PLATFORM_FEES.get("StubHub", 0)
+    cv_local_date = _localize_cv_date(cv_event)
 
     for sh in sh_events:
         if _is_junk(sh.name):
@@ -311,7 +422,7 @@ def match_stubhub(
         score = _name_similarity(cv_event.name, sh.name)
         if score < MATCH_THRESHOLD:
             continue
-        if not _dates_match(cv_event.event_date, sh.event_date):
+        if not _dates_match(cv_local_date, sh.event_date):
             continue
         if not _location_match(cv_event.city, sh.city, cv_event.venue, sh.venue):
             continue
@@ -356,6 +467,7 @@ def match_vividseats(
     """Find the cheapest matching VividSeats listing for a CrowdVolt event."""
     best = None
     fee_rate = config.PLATFORM_FEES.get("VividSeats", 0)
+    cv_local_date = _localize_cv_date(cv_event)
 
     for vs in vs_events:
         if _is_junk(vs.name):
@@ -363,7 +475,7 @@ def match_vividseats(
         score = _name_similarity(cv_event.name, vs.name)
         if score < MATCH_THRESHOLD:
             continue
-        if not _dates_match(cv_event.event_date, vs.event_date):
+        if not _dates_match(cv_local_date, vs.event_date):
             continue
         if not _location_match(cv_event.city, vs.city, cv_event.venue, vs.venue):
             continue
@@ -408,6 +520,7 @@ def match_gametime(
     """Find the cheapest matching Gametime listing for a CrowdVolt event."""
     best = None
     fee_rate = config.PLATFORM_FEES.get("Gametime", 0)
+    cv_local_date = _localize_cv_date(cv_event)
 
     for gt in gt_events:
         if _is_junk(gt.name):
@@ -415,7 +528,7 @@ def match_gametime(
         score = _name_similarity(cv_event.name, gt.name)
         if score < MATCH_THRESHOLD:
             continue
-        if not _dates_match(cv_event.event_date, gt.event_date):
+        if not _dates_match(cv_local_date, gt.event_date):
             continue
         if not _location_match(cv_event.city, gt.city, cv_event.venue, gt.venue):
             continue
