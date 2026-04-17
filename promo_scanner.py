@@ -1144,15 +1144,23 @@ def _send_groupme_digest(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Promo code scanner + GroupMe digest")
+    parser = argparse.ArgumentParser(description="Promo code scanner + GroupMe digest + Reddit ticket scan")
     parser.add_argument("--dry", action="store_true", help="Preview without sending to Discord")
     args = parser.parse_args()
 
-    # Both scans share the same CrowdVolt fetch
+    # All daily scans share the same CrowdVolt fetch
     cv_events = crowdvolt.fetch_all_events()
 
     scan_promos(dry_run=args.dry, cv_events=cv_events)
     scan_groupme(cv_events, dry_run=args.dry)
+
+    # Reddit ticket arbitrage scan — runs independently, failures
+    # in one scan don't affect the others
+    try:
+        import reddit_tix_scanner
+        reddit_tix_scanner.scan(dry_run=args.dry, cv_events=cv_events)
+    except Exception as e:
+        print(f"[Reddit Tix] Scan failed: {e}")
 
 
 if __name__ == "__main__":
