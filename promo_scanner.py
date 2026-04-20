@@ -971,11 +971,10 @@ def scan_groupme(cv_events: list, dry_run: bool = False) -> dict:
     Uses the full CrowdVolt catalog (including DICE) since GroupMe
     sellers transfer tickets directly — platform doesn't matter.
 
-    Rules carried over from the per-scan alerts:
-    - Demand (buy requests): only matches events with active sellers
-      (min_ask is not None) so there's something to buy on CrowdVolt.
-    - Supply (sell listings): only matches events with active buyers
-      (max_bid is not None) so there's a guaranteed buyer on CrowdVolt.
+    This is a demand/supply signal — shows what people are looking for
+    and selling, matched to CrowdVolt events for context. Does NOT
+    filter by arbitrage conditions (that's the Reddit scanner's job).
+
     - 7-day rolling lookback window.
     - Tiered matching: score >= 80 auto-match, 70-79 needs date/city.
     """

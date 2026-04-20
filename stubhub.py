@@ -84,21 +84,29 @@ def search_events(query: str, date_str: Optional[str] = None) -> list[StubHubEve
                 # on subsequent loads within the same page context.
                 # Limit to 3 to keep runtime reasonable.
                 for candidate in candidates[:3]:
-                    event_page = browser.new_page(
-                        user_agent=(
-                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/120.0.0.0 Safari/537.36"
-                        ),
-                        viewport={"width": 1280, "height": 800},
-                    )
-                    try:
-                        result = _fetch_event_price(event_page, candidate.url)
+                    result = None
+                    for attempt in range(2):
+                        event_page = browser.new_page(
+                            user_agent=(
+                                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/120.0.0.0 Safari/537.36"
+                            ),
+                            viewport={"width": 1280, "height": 800},
+                        )
+                        try:
+                            result = _fetch_event_price(event_page, candidate.url)
+                        finally:
+                            event_page.close()
                         if result is not None:
-                            candidate.min_price, candidate.price_is_all_in = result
-                            events.append(candidate)
-                    finally:
-                        event_page.close()
+                            break
+                        if attempt == 0:
+                            print(f"  [StubHub] Price fetch failed for {candidate.name}, retrying...")
+                    if result is not None:
+                        candidate.min_price, candidate.price_is_all_in = result
+                        events.append(candidate)
+                    else:
+                        print(f"  [StubHub] Could not get price for {candidate.name}")
 
             finally:
                 browser.close()

@@ -7,6 +7,7 @@ buyer fees on their platform.
 
 import re
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -64,12 +65,23 @@ def search_events(query: str, date_str: Optional[str] = None) -> list[TickPickEv
     slug = _slugify_query(query)
     performer_url = f"https://www.tickpick.com/concerts/{slug}-tickets/"
 
-    try:
-        resp = requests.get(performer_url, timeout=config.REQUEST_TIMEOUT, headers=HEADERS)
-        if resp.status_code == 200 and len(resp.text) > 5000:
-            events = _extract_events_from_html(resp.text)
-    except requests.RequestException:
-        pass
+    for attempt in range(3):
+        try:
+            resp = requests.get(performer_url, timeout=config.REQUEST_TIMEOUT, headers=HEADERS)
+            if resp.status_code == 200 and len(resp.text) > 5000:
+                events = _extract_events_from_html(resp.text)
+                break
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                print(f"  [TickPick] Performer page HTTP {resp.status_code}, retrying...")
+                time.sleep(2 * (attempt + 1))
+                continue
+            break  # 404 or other non-retryable status
+        except requests.RequestException as e:
+            if attempt < 2:
+                print(f"  [TickPick] Performer page error: {e}, retrying...")
+                time.sleep(2 * (attempt + 1))
+                continue
+            print(f"  [TickPick] Performer page failed after retries: {e}")
 
     # If direct URL didn't work, try search
     if not events:
@@ -98,10 +110,11 @@ def search_events(query: str, date_str: Optional[str] = None) -> list[TickPickEv
                             if found:
                                 events = found
                                 break
-                    except requests.RequestException:
+                    except requests.RequestException as e:
+                        print(f"  [TickPick] Search result page error: {e}")
                         continue
-        except requests.RequestException:
-            pass
+        except requests.RequestException as e:
+            print(f"  [TickPick] Search request failed: {e}")
 
     # Filter by date if provided
     if date_str and events:

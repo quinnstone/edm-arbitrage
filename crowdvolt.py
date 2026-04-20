@@ -178,15 +178,27 @@ def _parse_listings(items: list[dict]) -> list[Listing]:
     return listings
 
 
-def fetch_event(slug: str) -> Optional[CrowdVoltEvent]:
-    """Fetch and parse a single CrowdVolt event page."""
+def fetch_event(slug: str, retries: int = 2) -> Optional[CrowdVoltEvent]:
+    """Fetch and parse a single CrowdVolt event page.
+
+    Retries on transient failures (timeouts, 429s, 5xx) so rate-limiting
+    doesn't silently drop events from the scan.
+    """
     url = f"{config.CROWDVOLT_BASE_URL}/event/{slug}"
-    try:
-        resp = requests.get(url, timeout=config.REQUEST_TIMEOUT, headers=HEADERS)
-        if resp.status_code != 200:
+    for attempt in range(1 + retries):
+        try:
+            resp = requests.get(url, timeout=config.REQUEST_TIMEOUT, headers=HEADERS)
+            if resp.status_code == 200:
+                break
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < retries:
+                time.sleep(2 * (attempt + 1))  # backoff: 2s, 4s
+                continue
             return None
-    except requests.RequestException:
-        return None
+        except requests.RequestException:
+            if attempt < retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+            return None
 
     html = resp.text
 
@@ -253,6 +265,9 @@ def fetch_all_events() -> list[CrowdVoltEvent]:
     # Limit concurrency to 5 parallel requests
     semaphore = threading.Semaphore(5)
 
+    failed_slugs = []
+    failed_lock = threading.Lock()
+
     def _fetch_one(slug: str, index: int):
         with semaphore:
             event = fetch_event(slug)
@@ -276,9 +291,16 @@ def fetch_all_events() -> list[CrowdVoltEvent]:
                         events.append(event)
                     platform_tag = f" [{event.ticket_platform}]" if event.ticket_platform else ""
                     print(f"  [{done_count}/{len(slugs)}] {event.name}{platform_tag} — active")
+            else:
+                # Track failed fetches (not just empty events) for diagnostics
+                with failed_lock:
+                    failed_slugs.append(slug)
             # Only log every 50th skip to reduce noise
-            elif done_count % 50 == 0:
+            if not event and done_count % 50 == 0:
                 print(f"  [{done_count}/{len(slugs)}] scanning...")
+
+    if failed_slugs:
+        print(f"[CrowdVolt] {len(failed_slugs)} pages failed to fetch or had no data")
 
     print(f"[CrowdVolt] {len(events)} events with active listings")
     return events

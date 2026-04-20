@@ -53,9 +53,9 @@ def search_events(query: str, date_str: Optional[str] = None) -> list[VividSeats
 
                 # VividSeats serves a JS challenge page first (~5s) that
                 # auto-solves and reloads. Wait for the real page to appear.
-                # Retry once if the challenge doesn't resolve in time.
+                # Retry up to 3 times if the challenge doesn't resolve.
                 loaded = False
-                for attempt in range(2):
+                for attempt in range(3):
                     try:
                         page.wait_for_selector(
                             "#__NEXT_DATA__, [data-testid='productions-list'] a, a[href*='/tickets/']",
@@ -64,10 +64,11 @@ def search_events(query: str, date_str: Optional[str] = None) -> list[VividSeats
                         loaded = True
                         break
                     except PwTimeout:
-                        if attempt == 0:
+                        if attempt < 2:
+                            print(f"  [VividSeats] Challenge page attempt {attempt + 1}/3, retrying...")
                             page.reload(wait_until="domcontentloaded", timeout=15000)
                         else:
-                            print("  [VividSeats] Page did not load past challenge")
+                            print(f"  [VividSeats] Page did not load past challenge after 3 attempts")
                 if not loaded:
                     return []
 

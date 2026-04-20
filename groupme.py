@@ -452,15 +452,14 @@ def match_demand(
     - Score 70-79: match only if date OR city confirms
 
     Skips past events. Returns one GroupMeMatch per matched event,
-    with all matching buy requests grouped together.
+    with all matching buy requests grouped together. Matches against
+    all future events — CrowdVolt prices are shown as context, but
+    not required.
     """
     today = datetime.now().date()
-    # Filter to future events with active sellers — no seller means
-    # nothing to buy on CrowdVolt, so no actionable opportunity.
     active_events = [
         e for e in cv_events
-        if e.min_ask is not None
-        and (e.event_date is None or e.event_date.date() >= today)
+        if e.event_date is None or e.event_date.date() >= today
     ]
 
     matches: dict[str, GroupMeMatch] = {}
@@ -505,23 +504,19 @@ def match_supply(
     sell_listings: list[SellListing],
     cv_events: list[CrowdVoltEvent],
 ) -> list[GroupMeSellMatch]:
-    """Match sell listings against CrowdVolt events with active bids.
-
-    Only considers events where someone on CrowdVolt is already offering
-    to buy — no bid means no guaranteed buyer, so no alert.
+    """Match sell listings against CrowdVolt events.
 
     Uses tiered thresholds (same as demand):
     - Score >= 80: match
     - Score 70-79: match only if date OR city confirms
 
     Skips past events. Returns one match per event, with all matching
-    sell listings grouped.
+    sell listings grouped. CrowdVolt prices shown as context, not required.
     """
     today = datetime.now().date()
-    events_with_bids = [
+    active_events = [
         e for e in cv_events
-        if e.max_bid is not None
-        and (e.event_date is None or e.event_date.date() >= today)
+        if e.event_date is None or e.event_date.date() >= today
     ]
 
     matches: dict[str, GroupMeSellMatch] = {}
@@ -530,7 +525,7 @@ def match_supply(
         best_score = 0
         best_event = None
 
-        for event in events_with_bids:
+        for event in active_events:
             score = _name_similarity(listing.event_query, event.name)
             if score <= best_score:
                 continue

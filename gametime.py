@@ -7,6 +7,7 @@ a headless browser.
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -48,16 +49,29 @@ def search_events(query: str, date_str: Optional[str] = None) -> list[GametimeEv
     """
     url = f"https://gametime.co/search?q={query.replace(' ', '+')}"
 
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=config.REQUEST_TIMEOUT)
-        if resp.status_code != 200:
+    html = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=config.REQUEST_TIMEOUT)
+            if resp.status_code == 200:
+                html = resp.text
+                break
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                print(f"  [Gametime] HTTP {resp.status_code}, retrying...")
+                time.sleep(2 * (attempt + 1))
+                continue
             print(f"  [Gametime] HTTP {resp.status_code}")
             return []
-    except requests.RequestException as e:
-        print(f"  [Gametime] Request failed: {e}")
-        return []
+        except requests.RequestException as e:
+            if attempt < 2:
+                print(f"  [Gametime] Request error: {e}, retrying...")
+                time.sleep(2 * (attempt + 1))
+                continue
+            print(f"  [Gametime] Request failed after retries: {e}")
+            return []
 
-    html = resp.text
+    if html is None:
+        return []
     events = _extract_json_ld(html)
 
     # Filter by date if provided

@@ -1,5 +1,6 @@
 """SeatGeek API client for fetching event pricing."""
 
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -48,16 +49,31 @@ def search_events(query: str, date_str: Optional[str] = None) -> list[SeatGeekEv
         params["datetime_local.gte"] = f"{date_str}T00:00:00"
         params["datetime_local.lte"] = f"{date_str}T23:59:59"
 
-    try:
-        resp = requests.get(
-            f"{BASE_URL}/events",
-            params=params,
-            timeout=config.REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except requests.RequestException as e:
-        print(f"[SeatGeek] API error: {e}")
+    data = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(
+                f"{BASE_URL}/events",
+                params=params,
+                timeout=config.REQUEST_TIMEOUT,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                break
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                print(f"[SeatGeek] HTTP {resp.status_code}, retrying...")
+                time.sleep(2 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            if attempt < 2:
+                print(f"[SeatGeek] API error: {e}, retrying...")
+                time.sleep(2 * (attempt + 1))
+                continue
+            print(f"[SeatGeek] API error after retries: {e}")
+            return []
+
+    if data is None:
         return []
 
     events = []
