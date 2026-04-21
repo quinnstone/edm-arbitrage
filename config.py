@@ -33,7 +33,7 @@ CROWDVOLT_BASE_URL = "https://www.crowdvolt.com"
 # TickPick advertises no buyer fees; others charge 20-30%.
 PLATFORM_FEES = {
     "SeatGeek": 0.22,
-    "StubHub": 0.45,
+    "StubHub": 0.28,
     "VividSeats": 0.28,
     "TickPick": 0.0,
     "Gametime": 0.0,  # Gametime shows all-in prices (no hidden fees)

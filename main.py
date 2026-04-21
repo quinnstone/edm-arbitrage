@@ -91,94 +91,94 @@ def scan_once() -> int:
 
         # --- HTTP-based sources (fast) ---
 
-        # Search SeatGeek — try each query until we get results
-        sg_results = []
+        # Search SeatGeek — try each query, break when we get a matched opportunity
+        sg_opps = []
         for q in queries:
             try:
                 sg_results = seatgeek.search_events(q, date_str)
                 if sg_results:
-                    break
+                    sg_opps = matcher.match_seatgeek(cv_event, sg_results)
+                    if sg_opps:
+                        break  # got a real match, stop trying queries
             except Exception as e:
                 print(f"  [SeatGeek] Error on query '{q}': {e}")
                 errors += 1
-        if sg_results:
-            sg_opps = matcher.match_seatgeek(cv_event, sg_results)
-            if sg_opps:
-                event_matched = True
+        if sg_opps:
+            event_matched = True
             for opp in sg_opps:
                 _log_opportunity(opp)
             all_opportunities.extend(sg_opps)
 
-        # Search TickPick — try each query until we get results
-        tp_results = []
+        # Search TickPick — try each query, break when we get a matched opportunity
+        tp_opps = []
         for q in queries:
             try:
                 tp_results = tickpick.search_events(q, date_str)
                 if tp_results:
-                    break
+                    tp_opps = matcher.match_tickpick(cv_event, tp_results)
+                    if tp_opps:
+                        break
             except Exception as e:
                 print(f"  [TickPick] Error on query '{q}': {e}")
                 errors += 1
-        if tp_results:
-            tp_opps = matcher.match_tickpick(cv_event, tp_results)
-            if tp_opps:
-                event_matched = True
+        if tp_opps:
+            event_matched = True
             for opp in tp_opps:
                 _log_opportunity(opp)
             all_opportunities.extend(tp_opps)
 
         # --- Playwright-based sources (slower, headless browser) ---
 
-        # Search StubHub — try each query until we get results
-        sh_results = []
+        # Search StubHub — try each query, break when we get a matched opportunity
+        sh_opps = []
         for q in queries:
             try:
                 sh_results = stubhub.search_events(q, date_str)
                 if sh_results:
-                    break
+                    sh_opps = matcher.match_stubhub(cv_event, sh_results)
+                    if sh_opps:
+                        break
             except Exception as e:
                 print(f"  [StubHub] Error on query '{q}': {e}")
                 errors += 1
-        if sh_results:
-            sh_opps = matcher.match_stubhub(cv_event, sh_results)
-            if sh_opps:
-                event_matched = True
+        if sh_opps:
+            event_matched = True
             for opp in sh_opps:
                 _log_opportunity(opp)
             all_opportunities.extend(sh_opps)
 
-        # Search VividSeats — try each query until we get results
-        vs_results = []
+        # Search VividSeats — try each query, break when we get a matched opportunity
+        vs_opps = []
         for q in queries:
             try:
                 vs_results = vividseats.search_events(q, date_str)
                 if vs_results:
-                    break
+                    vs_opps = matcher.match_vividseats(cv_event, vs_results)
+                    if vs_opps:
+                        break
             except Exception as e:
                 print(f"  [VividSeats] Error on query '{q}': {e}")
                 errors += 1
-        if vs_results:
-            vs_opps = matcher.match_vividseats(cv_event, vs_results)
-            if vs_opps:
-                event_matched = True
+        if vs_opps:
+            event_matched = True
             for opp in vs_opps:
                 _log_opportunity(opp)
             all_opportunities.extend(vs_opps)
 
-        # Search Gametime — try each query until we get results
-        gt_results = []
+        # Search Gametime — try each query, break when we get a matched opportunity
+        gt_opps = []
         for q in queries:
             try:
                 gt_results = gametime.search_events(q, date_str)
                 if gt_results:
-                    break
+                    gt_opps = matcher.match_gametime(cv_event, gt_results)
+                    if gt_opps:
+                        break
             except Exception as e:
                 print(f"  [Gametime] Error on query '{q}': {e}")
                 errors += 1
-        if gt_results:
-            gt_opps = matcher.match_gametime(cv_event, gt_results)
-            if gt_opps:
-                event_matched = True
+        if gt_opps:
+            event_matched = True
             for opp in gt_opps:
                 _log_opportunity(opp)
             all_opportunities.extend(gt_opps)
