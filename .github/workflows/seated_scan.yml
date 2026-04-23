@@ -1,15 +1,15 @@
-name: Promo Code Scan
+name: Seated Venue Scan
 
 on:
   schedule:
-    # Run daily at 10am ET (2pm UTC)
-    - cron: "0 14 * * *"
+    # Run every 30 minutes
+    - cron: "*/30 * * * *"
   workflow_dispatch: # Allow manual triggers
 
 jobs:
-  promo-scan:
+  scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -23,9 +23,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run promo scan + GroupMe digest
+      - name: Install Playwright browsers
+        run: playwright install chromium --with-deps
+
+      - name: Run seated venue scan
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          GROUPME_TOKEN: ${{ secrets.GROUPME_TOKEN }}
-          GROUPME_GROUP_ID: ${{ secrets.GROUPME_GROUP_ID }}
-        run: python promo_scanner.py
+        run: python seated_scanner.py

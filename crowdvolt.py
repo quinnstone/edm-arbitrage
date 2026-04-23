@@ -262,8 +262,8 @@ def fetch_all_events() -> list[CrowdVoltEvent]:
 
     events = []
     lock = threading.Lock()
-    # Limit concurrency to 5 parallel requests
-    semaphore = threading.Semaphore(5)
+    # Limit concurrency to 10 parallel requests
+    semaphore = threading.Semaphore(10)
 
     failed_slugs = []
     failed_lock = threading.Lock()
@@ -271,10 +271,10 @@ def fetch_all_events() -> list[CrowdVoltEvent]:
     def _fetch_one(slug: str, index: int):
         with semaphore:
             event = fetch_event(slug)
-            time.sleep(0.3)  # small delay per request
+            time.sleep(0.15)  # small delay per request
         return index, slug, event
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {
             pool.submit(_fetch_one, slug, i): slug
             for i, slug in enumerate(slugs)
