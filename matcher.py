@@ -218,8 +218,25 @@ def _localize_cv_date(cv_event) -> Optional[datetime]:
     return dt.astimezone(tz)
 
 
+def _nightlife_date(dt):
+    """Return the 'nightlife date' for a datetime.
+
+    Events starting between midnight and 6am are continuations of the
+    previous evening (e.g. a 3am Saturday afters set is really a Friday
+    night event). Maps those times to the previous calendar day so that
+    a Friday-night-into-Saturday-morning show doesn't collide with the
+    actual Saturday-night show at the same venue.
+    """
+    if dt is None:
+        return None
+    d = dt.date() if hasattr(dt, 'date') else dt
+    if hasattr(dt, 'hour') and dt.hour < 6:
+        return d - timedelta(days=1)
+    return d
+
+
 def _dates_match(dt1, dt2, tolerance_days: int = 0) -> bool:
-    """Check if two dates fall on the same calendar date.
+    """Check if two dates fall on the same nightlife date.
 
     CrowdVolt dates should be pre-localized via _localize_cv_date()
     so we can compare with zero tolerance. Other platforms already
@@ -229,8 +246,8 @@ def _dates_match(dt1, dt2, tolerance_days: int = 0) -> bool:
     """
     if dt1 is None or dt2 is None:
         return True  # if we can't compare dates, allow the match through
-    d1 = dt1.date() if hasattr(dt1, 'date') else dt1
-    d2 = dt2.date() if hasattr(dt2, 'date') else dt2
+    d1 = _nightlife_date(dt1)
+    d2 = _nightlife_date(dt2)
     return abs((d1 - d2).days) <= tolerance_days
 
 
@@ -304,6 +321,13 @@ def _name_similarity(name1: str, name2: str) -> int:
                 if seg_score > best:
                     best = seg_score
 
+    # Short names (< 6 chars) are too ambiguous for the standard threshold.
+    # "hamdi" vs "handi" scores 80 — close enough to pass 70, but clearly
+    # wrong.  Require near-exact (85+) for short names; cap others below
+    # the match threshold so callers reject them uniformly.
+    if min(len(a), len(b)) < 6 and best < 85:
+        return min(best, MATCH_THRESHOLD - 1)
+
     return best
 
 
@@ -342,21 +366,10 @@ def _normalize_city(raw: str) -> str:
     return CITY_ALIASES.get(city, city)
 
 
-def _venues_match(venue1: str, venue2: str) -> bool:
-    """Check if two venue names refer to the same place."""
-    if not venue1 or not venue2:
-        return True  # if either is missing, can't disprove — allow through
-    v1 = venue1.lower().strip()
-    v2 = venue2.lower().strip()
-    if v1 == v2 or v1 in v2 or v2 in v1:
-        return True
-    return fuzz.ratio(v1, v2) >= 75
-
-
 def _cities_match(city1: str, city2: str) -> bool:
     """Check if two city strings refer to the same metro area."""
     if not city1 or not city2:
-        return True  # if either is missing, allow through
+        return True  # missing data — can't disprove, allow through
 
     c1 = _normalize_city(city1)
     c2 = _normalize_city(city2)
@@ -366,18 +379,6 @@ def _cities_match(city1: str, city2: str) -> bool:
 
     # Fuzzy fallback for cities with slight name variations
     return fuzz.ratio(c1, c2) >= 80
-
-
-def _location_match(city1: str, city2: str, venue1: str = "", venue2: str = "") -> bool:
-    """Check if two events are at the same location.
-
-    Tries city first; falls back to venue comparison when city is missing
-    on either side. Only allows through when BOTH city and venue are empty.
-    """
-    if city1 and city2:
-        return _cities_match(city1, city2)
-    # City missing on one or both sides — fall back to venue
-    return _venues_match(venue1, venue2)
 
 
 def match_seatgeek(
@@ -397,7 +398,7 @@ def match_seatgeek(
             continue
         if not _dates_match(cv_local_date, sg.event_date):
             continue
-        if not _location_match(cv_event.city, sg.city, cv_event.venue, sg.venue):
+        if not _cities_match(cv_event.city, sg.city):
             continue
         if sg.lowest_price is None:
             continue
@@ -444,7 +445,7 @@ def match_tickpick(
             continue
         if not _dates_match(cv_local_date, tp.event_date):
             continue
-        if not _location_match(cv_event.city, tp.city, cv_event.venue, tp.venue):
+        if not _cities_match(cv_event.city, tp.city):
             continue
         if tp.low_price is None:
             continue
@@ -491,7 +492,7 @@ def match_stubhub(
             continue
         if not _dates_match(cv_local_date, sh.event_date):
             continue
-        if not _location_match(cv_event.city, sh.city, cv_event.venue, sh.venue):
+        if not _cities_match(cv_event.city, sh.city):
             continue
         if sh.min_price is None:
             continue
@@ -544,7 +545,7 @@ def match_vividseats(
             continue
         if not _dates_match(cv_local_date, vs.event_date):
             continue
-        if not _location_match(cv_event.city, vs.city, cv_event.venue, vs.venue):
+        if not _cities_match(cv_event.city, vs.city):
             continue
         if vs.min_price is None:
             continue
@@ -597,7 +598,7 @@ def match_gametime(
             continue
         if not _dates_match(cv_local_date, gt.event_date):
             continue
-        if not _location_match(cv_event.city, gt.city, cv_event.venue, gt.venue):
+        if not _cities_match(cv_event.city, gt.city):
             continue
         if gt.min_price is None:
             continue

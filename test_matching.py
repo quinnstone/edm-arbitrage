@@ -105,36 +105,6 @@ def test_name_similarity_pairs():
     return failures
 
 
-def test_venue_matching():
-    """Test venue matching logic."""
-    print("=" * 60)
-    print("VENUE MATCHING TESTS")
-    print("=" * 60)
-
-    pairs = [
-        ("Brooklyn Mirage", "Brooklyn Mirage", True, "exact"),
-        ("Brooklyn Mirage", "Moody Center", False, "different venues"),
-        ("Brooklyn Mirage", "The Brooklyn Mirage", True, "substring"),
-        ("Madison Square Garden", "MSG", False, "abbreviation — no alias"),
-        ("", "Brooklyn Mirage", True, "empty venue allows through"),
-        ("", "", True, "both empty allows through"),
-        ("Webster Hall", "Webster Hall", True, "exact"),
-        ("Avant Gardner", "Brooklyn Mirage", False, "different NYC venues"),
-    ]
-
-    failures = 0
-    for v1, v2, expected, desc in pairs:
-        result = matcher._venues_match(v1, v2)
-        correct = result == expected
-        status = "✓" if correct else "✗"
-        if not correct:
-            failures += 1
-        print(f"  {status} \"{v1}\" vs \"{v2}\" → {result} ({desc})")
-
-    print(f"\n  {len(pairs) - failures}/{len(pairs)} passed\n")
-    return failures
-
-
 def test_city_matching():
     """Test city matching and aliases."""
     print("=" * 60)
@@ -164,37 +134,6 @@ def test_city_matching():
         print(f"  {status} \"{c1}\" vs \"{c2}\" → {result} ({desc})")
 
     print(f"\n  {len(pairs) - failures}/{len(pairs)} passed\n")
-    return failures
-
-
-def test_location_matching():
-    """Test _location_match with city+venue fallback."""
-    print("=" * 60)
-    print("LOCATION MATCHING TESTS (city → venue fallback)")
-    print("=" * 60)
-
-    # (city1, city2, venue1, venue2, expected, desc)
-    cases = [
-        ("New York", "New York", "Brooklyn Mirage", "Brooklyn Mirage", True, "both match"),
-        ("Austin", "New York", "Moody Center", "Brooklyn Mirage", False, "city mismatch"),
-        ("", "", "Moody Center", "Brooklyn Mirage", False, "city empty, venue mismatch — CATCHES Two Friends bug"),
-        ("", "", "Brooklyn Mirage", "Brooklyn Mirage", True, "city empty, venue match"),
-        ("", "New York", "Brooklyn Mirage", "Brooklyn Mirage", True, "one city empty, venue match"),
-        ("", "New York", "Moody Center", "Brooklyn Mirage", False, "one city empty, venue mismatch"),
-        ("", "", "", "", True, "everything empty, allow through"),
-        ("New York", "Brooklyn", "Avant Gardner", "Brooklyn Mirage", True, "city alias match, different venues OK"),
-    ]
-
-    failures = 0
-    for c1, c2, v1, v2, expected, desc in cases:
-        result = matcher._location_match(c1, c2, v1, v2)
-        correct = result == expected
-        status = "✓" if correct else "✗"
-        if not correct:
-            failures += 1
-        print(f"  {status} city(\"{c1}\",\"{c2}\") venue(\"{v1}\",\"{v2}\") → {result} ({desc})")
-
-    print(f"\n  {len(cases) - failures}/{len(cases)} passed\n")
     return failures
 
 
@@ -231,7 +170,7 @@ def test_live_crowdvolt_vs_providers():
                 for sg in sg_results[:3]:
                     score = matcher._name_similarity(cv.name, sg.title)
                     date_ok = matcher._dates_match(cv.event_date, sg.event_date)
-                    loc_ok = matcher._location_match(cv.city, sg.city, cv.venue, sg.venue)
+                    loc_ok = matcher._cities_match(cv.city, sg.city)
                     would_match = score >= matcher.MATCH_THRESHOLD and date_ok and loc_ok
 
                     sg_city = sg.city or "(no city)"
@@ -258,7 +197,7 @@ def test_live_crowdvolt_vs_providers():
             for tp in tp_results[:3]:
                 score = matcher._name_similarity(cv.name, tp.name)
                 date_ok = matcher._dates_match(cv.event_date, tp.event_date)
-                loc_ok = matcher._location_match(cv.city, tp.city, cv.venue, tp.venue)
+                loc_ok = matcher._cities_match(cv.city, tp.city)
                 would_match = score >= matcher.MATCH_THRESHOLD and date_ok and loc_ok
 
                 tp_city = tp.city or "(no city)"
@@ -424,9 +363,7 @@ if __name__ == "__main__":
     # Unit tests (no API calls)
     total_failures += test_name_extraction()
     total_failures += test_name_similarity_pairs()
-    total_failures += test_venue_matching()
     total_failures += test_city_matching()
-    total_failures += test_location_matching()
 
     # Live tests (API calls)
     total_failures += test_live_crowdvolt_vs_providers()
