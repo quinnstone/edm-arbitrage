@@ -19,6 +19,7 @@ import notifier
 import seatgeek
 import stubhub
 import tickpick
+import undercut
 import vividseats
 
 
@@ -205,13 +206,32 @@ def scan_once() -> int:
         notifier.send_alert(opps)
         time.sleep(1)  # respect Discord rate limits
 
+    # Step 4: Track bid/ask snapshots and evaluate speculative opportunities.
+    undercut.save_bid_snapshot(cv_events)
+    undercut.update_listing_persistence(cv_events)
+
+    # Step 5: Evaluate speculative listing opportunities.
+    # List on 3P platform at market price → source from CrowdVolt when sold.
+    spec_opps = undercut.find_opportunities(all_opportunities, bid_events)
+    spec_sent = 0
+    if spec_opps:
+        print(f"[Scan] {len(spec_opps)} speculative listing opportunities detected")
+        spec_sent = undercut.send_alerts(spec_opps)
+
+    # Step 6: Log full scan results for backtesting (includes alert outcomes).
+    undercut.log_scan_results(
+        bid_events, all_opportunities,
+        arb_count=len(by_event), spec_opps=spec_opps,
+    )
+
     notifier.send_summary(
         len(cv_events), len(by_event), errors,
         events_with_bids, match_failures,
         dice_filtered=len(dice_events),
+        undercut_sent=spec_sent,
     )
 
-    print(f"[Scan] Done — {len(by_event)} arbitrage alerts")
+    print(f"[Scan] Done — {len(by_event)} arb alerts, {spec_sent} speculative alerts")
     return len(by_event)
 
 
@@ -242,8 +262,7 @@ def _filter_opportunities(opps: list) -> list:
         # ONLY alert when there is an active bid we can profit from
         if opp.profit_vs_bid is not None and opp.profit_vs_bid > 0:
             margin = (opp.profit_vs_bid / opp.source_price) * 100
-            if (opp.profit_vs_bid >= config.MIN_PROFIT_THRESHOLD
-                    and margin >= config.MIN_PROFIT_MARGIN_PCT):
+            if margin >= config.MIN_PROFIT_MARGIN_PCT:
                 filtered.append(opp)
 
     return filtered

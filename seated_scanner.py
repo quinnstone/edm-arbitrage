@@ -46,19 +46,20 @@ _SEATED_SLUG_KEYWORDS = ["barclays", "madison-square", "forest-hills", "msg"]
 SEATED_SCAN_INTERVAL = 30
 
 # Section name aliases — maps platform-specific names to a common key.
-# Both CrowdVolt and TickPick formats are mapped here.
+# normalize_section() canonicalizes "General Admission" → "GA" before
+# this lookup runs, so both spellings hit the same entries.
 _SECTION_ALIASES = {
-    # CrowdVolt formats
-    "front general admission": "front_ga",
-    "back general admission": "back_ga",
-    "rear general admission": "back_ga",
+    # CrowdVolt-style
+    "front ga": "front_ga",
+    "back ga": "back_ga",
+    "rear ga": "back_ga",  # rear == back
     "ga (floor)": "floor_ga",
     "ga (bowl)": "bowl_ga",
     "ga floor": "floor_ga",
     "ga bowl": "bowl_ga",
     "floor": "floor",
     "pit": "pit",
-    # TickPick formats
+    # TickPick-style
     "front floor ga": "front_ga",
     "rear floor ga": "back_ga",
     "floor ga": "floor_ga",
@@ -97,6 +98,11 @@ def normalize_section(raw: str) -> str:
     """
     lower = raw.lower().strip()
 
+    # Canonicalize "General Admission" → "GA" so both spellings collapse
+    # onto the same alias entries (e.g. "Front General Admission" and
+    # "Front Floor GA" both end up as "front_ga").
+    lower = re.sub(r"\bgeneral admission\b", "ga", lower)
+
     # Check alias table first
     if lower in _SECTION_ALIASES:
         return _SECTION_ALIASES[lower]
@@ -109,6 +115,13 @@ def normalize_section(raw: str) -> str:
     # Already a bare number
     if re.match(r"^\d+$", lower):
         return lower
+
+    # Bucket unrecognized GA-prefix variants (GA+, GA Plus, GA Premium, etc.)
+    # to plain "ga" — these are vendor-specific spellings of the same tier,
+    # not real tier upgrades. Structured GA variants (Front/Back/Floor/Bowl)
+    # are caught by the alias table above before this runs.
+    if re.match(r"^ga\b", lower):
+        return "ga"
 
     # Fallback — return cleaned lowercase
     return re.sub(r"[^a-z0-9]+", "_", lower).strip("_")
@@ -282,8 +295,6 @@ def find_section_arbitrage(
         profit = bid.all_in_price - tp.price
 
         if profit <= 0:
-            continue
-        if profit < config.MIN_PROFIT_THRESHOLD:
             continue
 
         margin = (profit / tp.price) * 100

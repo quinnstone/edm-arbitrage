@@ -108,6 +108,7 @@ def send_summary(
     events_with_bids: int = 0,
     match_failures: int = 0,
     dice_filtered: int = 0,
+    undercut_sent: int = 0,
 ) -> bool:
     """Send a scan summary to Discord."""
     asks_only = total_events - events_with_bids
@@ -136,6 +137,7 @@ def send_summary(
                 f"**{events_with_bids}** with waiting buyers · "
                 f"**{asks_only}** sellers only\n"
                 f"**{opportunities}** arbitrage opportunities found\n"
+                f"**{undercut_sent}** speculative listing opportunities\n"
                 f"**{match_failures}** events with no cross-platform match\n"
                 f"**{errors}** API/scrape errors\n\n"
                 f"Sources: {sources_str}\n"

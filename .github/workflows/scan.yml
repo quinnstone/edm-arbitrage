@@ -26,8 +26,23 @@ jobs:
       - name: Install Playwright browsers
         run: playwright install chromium --with-deps
 
+      - name: Restore tracking data
+        uses: actions/cache/restore@v4
+        with:
+          path: data/
+          key: tracking-${{ github.run_id }}
+          restore-keys: |
+            tracking-
+
       - name: Run arbitrage scan
         env:
           SEATGEEK_CLIENT_ID: ${{ secrets.SEATGEEK_CLIENT_ID }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python main.py
+
+      - name: Save tracking data
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/
+          key: tracking-${{ github.run_id }}

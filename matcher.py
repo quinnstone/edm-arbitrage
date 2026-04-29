@@ -218,10 +218,18 @@ def _localize_cv_date(cv_event) -> Optional[datetime]:
     return dt.astimezone(tz)
 
 
+# Hour at which a "nightlife day" ends. Events starting before this hour
+# are treated as continuations of the previous evening rather than belonging
+# to the calendar day they technically fall on. The 4–7am band is empty
+# in practice (no real shows start there), so the exact value is insensitive;
+# 6am is the safe upper bound.
+NIGHTLIFE_END_HOUR = 6
+
+
 def _nightlife_date(dt):
     """Return the 'nightlife date' for a datetime.
 
-    Events starting between midnight and 6am are continuations of the
+    Events starting before NIGHTLIFE_END_HOUR are continuations of the
     previous evening (e.g. a 3am Saturday afters set is really a Friday
     night event). Maps those times to the previous calendar day so that
     a Friday-night-into-Saturday-morning show doesn't collide with the
@@ -230,7 +238,7 @@ def _nightlife_date(dt):
     if dt is None:
         return None
     d = dt.date() if hasattr(dt, 'date') else dt
-    if hasattr(dt, 'hour') and dt.hour < 6:
+    if hasattr(dt, 'hour') and dt.hour < NIGHTLIFE_END_HOUR:
         return d - timedelta(days=1)
     return d
 

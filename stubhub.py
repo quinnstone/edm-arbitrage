@@ -8,12 +8,14 @@ so we navigate to each candidate event page to extract pricing from JSON-LD.
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
 from dateutil import parser as dateparser
 from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
+from thefuzz import fuzz
 
 import config
 
@@ -79,11 +81,35 @@ def search_events(query: str, date_str: Optional[str] = None) -> list[StubHubEve
                     except (ValueError, TypeError):
                         pass
 
+                # Pre-filter: skip candidates whose name is clearly unrelated
+                # to the search query.  Saves 15-25s per skipped candidate
+                # (each price fetch requires a full browser page load) and
+                # reduces rate-limit/bot-detection risk.
+                pre_filtered = []
+                for c in candidates:
+                    if not c.name:
+                        pre_filtered.append(c)
+                        continue
+                    score = max(
+                        fuzz.ratio(query.lower(), c.name.lower()),
+                        fuzz.partial_ratio(query.lower(), c.name.lower()),
+                    )
+                    if score >= 60:
+                        pre_filtered.append(c)
+                    else:
+                        print(f"  [StubHub] Skipping '{c.name}' (low relevance to '{query}')")
+                candidates = pre_filtered
+
                 # Navigate to each candidate's event page to get pricing.
                 # Use a fresh page per event — StubHub throttles JS rendering
                 # on subsequent loads within the same page context.
                 # Limit to 3 to keep runtime reasonable.
-                for candidate in candidates[:3]:
+                for idx, candidate in enumerate(candidates[:3]):
+                    # Small delay between event page loads to reduce
+                    # rate-limiting and bot detection
+                    if idx > 0:
+                        time.sleep(2)
+
                     result = None
                     for attempt in range(2):
                         event_page = browser.new_page(
