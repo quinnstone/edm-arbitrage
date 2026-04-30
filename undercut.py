@@ -431,10 +431,13 @@ def find_opportunities(
     must be positive.
 
     Criteria:
-    - CrowdVolt has active sellers (min_ask exists)
+    - CrowdVolt has active sellers (min_ask exists) — required to source
     - 3P market price > CrowdVolt ask + 3P seller fee (profitable)
     - Event is within 30 days
-    - At least 2 bids on CrowdVolt (demand signal — confirms interest)
+
+    Bid count is informational, not a gate — the alert surfaces it
+    alongside ask depth and persistence ages so the operator can judge
+    demand confidence per-opportunity.
     """
     results = []
     today = datetime.now().date()
@@ -455,10 +458,7 @@ def find_opportunities(
         if cv.min_ask is None:
             continue
 
-        # Must have demand signal
         bid_count = len(cv.bids)
-        if bid_count < 2:
-            continue
 
         # Must be upcoming
         days_until = None

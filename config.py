@@ -19,9 +19,6 @@ GROUPME_LOOKBACK_DAYS = 7
 # Scrape interval in minutes
 SCAN_INTERVAL_MINUTES = 15
 
-# Minimum profit threshold (dollars) to trigger an alert
-MIN_PROFIT_THRESHOLD = 10
-
 # Minimum profit margin (percentage) to trigger an alert
 MIN_PROFIT_MARGIN_PCT = 5
 
