@@ -22,6 +22,15 @@ SCAN_INTERVAL_MINUTES = 15
 # Minimum profit margin (percentage) to trigger an alert
 MIN_PROFIT_MARGIN_PCT = 5
 
+# Minimum estimated profit (dollars) for a CV→3P spec listing alert.
+# Smaller spreads aren't worth the operational overhead of a spec listing.
+MIN_SPEC_PROFIT = 10
+
+# Hour at which the daily CV→3P spec digest fires, in America/New_York.
+# 17 = 5pm. Within this hour the digest sends at most once thanks to
+# per-event cooldown.
+SPEC_DIGEST_HOUR = 17
+
 # CrowdVolt base URL
 CROWDVOLT_BASE_URL = "https://www.crowdvolt.com"
 

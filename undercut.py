@@ -19,6 +19,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -36,8 +37,12 @@ SELLER_FEES = {
     "Gametime": 0.10,
 }
 
-# Don't re-alert the same event within this window
-ALERT_COOLDOWN_HOURS = 24
+# Don't re-alert the same event within this window. 23h (not 24h) ensures
+# tomorrow's digest at the same wall-clock hour clears the cooldown without
+# a clock-precision race.
+ALERT_COOLDOWN_HOURS = 23
+
+DIGEST_TIMEZONE = ZoneInfo("America/New_York")
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 SENT_ALERTS_FILE = os.path.join(_DATA_DIR, "undercut_sent.json")
@@ -432,12 +437,10 @@ def find_opportunities(
 
     Criteria:
     - CrowdVolt has active sellers (min_ask exists) — required to source
+    - At least 1 active CrowdVolt bid — minimal demand signal
     - 3P market price > CrowdVolt ask + 3P seller fee (profitable)
+    - Estimated profit >= MIN_SPEC_PROFIT
     - Event is within 30 days
-
-    Bid count is informational, not a gate — the alert surfaces it
-    alongside ask depth and persistence ages so the operator can judge
-    demand confidence per-opportunity.
     """
     results = []
     today = datetime.now().date()
@@ -458,7 +461,10 @@ def find_opportunities(
         if cv.min_ask is None:
             continue
 
+        # Need at least one active bid — minimal demand validation
         bid_count = len(cv.bids)
+        if bid_count < 1:
+            continue
 
         # Must be upcoming
         days_until = None
@@ -482,7 +488,7 @@ def find_opportunities(
             payout = sell_price * (1 - seller_fee)
             profit = payout - cv.min_ask
 
-            if profit <= 0:
+            if profit < config.MIN_SPEC_PROFIT:
                 continue
 
             margin = (profit / cv.min_ask) * 100
@@ -520,37 +526,62 @@ def find_opportunities(
 # ---------------------------------------------------------------------------
 
 def send_alerts(opportunities: list[SpeculativeOpportunity]) -> int:
-    """Send Discord alerts for speculative listing opportunities.
+    """Send a daily digest of CV→3P spec opportunities to Discord.
 
-    Deduplicates so the same event isn't alerted more than once per 24h.
-    Returns the number of alerts actually sent.
+    Fires only when the local NYC hour equals SPEC_DIGEST_HOUR. All fresh
+    opportunities are batched into a single message, sorted by est_profit
+    and capped at 10 (Discord's per-message embed limit). The 23h per-event
+    cooldown ensures the same event doesn't appear in tomorrow's digest if
+    it's still around — and prevents duplicate sends across the multiple
+    scans that happen within the digest hour.
+
+    Returns the number of opportunities included in the digest, or 0 when
+    we're outside the digest window or have nothing fresh to send.
     """
     if not config.DISCORD_WEBHOOK_URL:
         return 0
 
-    sent = 0
-    for opp in opportunities:
-        slug = opp.crowdvolt_event.slug
-        if _was_recently_alerted(slug):
-            print(f"  [Spec] {opp.crowdvolt_event.name} — already alerted, skipping")
-            continue
+    now_nyc = datetime.now(DIGEST_TIMEZONE)
+    if now_nyc.hour != config.SPEC_DIGEST_HOUR:
+        return 0
 
-        embed = _format_alert(opp)
-        payload = {"username": "Ticket Arb", "embeds": [embed]}
+    fresh = [o for o in opportunities
+             if not _was_recently_alerted(o.crowdvolt_event.slug)]
+    if not fresh:
+        return 0
 
-        try:
-            resp = requests.post(
-                config.DISCORD_WEBHOOK_URL, json=payload,
-                timeout=config.REQUEST_TIMEOUT,
-            )
-            resp.raise_for_status()
-            _mark_alerted(slug)
-            sent += 1
-            print(f"  [Spec] Alert sent for {opp.crowdvolt_event.name}")
-        except requests.RequestException as e:
-            print(f"  [Spec] Failed to send alert: {e}")
+    fresh.sort(key=lambda o: o.est_profit, reverse=True)
+    top = fresh[:10]
 
-    return sent
+    date_str = now_nyc.strftime("%b %d")
+    plural = "ies" if len(fresh) != 1 else "y"
+    summary = (f"🔔 **CV→3P Spec Digest** — {date_str} — "
+               f"{len(fresh)} opportunit{plural}")
+    if len(fresh) > 10:
+        summary += "  _(showing top 10 by profit)_"
+
+    payload = {
+        "username": "Ticket Arb",
+        "content": summary,
+        "embeds": [_format_alert(o) for o in top],
+    }
+
+    try:
+        resp = requests.post(
+            config.DISCORD_WEBHOOK_URL, json=payload,
+            timeout=config.REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        for opp in top:
+            _mark_alerted(opp.crowdvolt_event.slug)
+        print(f"  [Spec] Digest sent — {len(top)} opportunities "
+              f"({len(fresh) - len(top)} more deferred to tomorrow)"
+              if len(fresh) > 10
+              else f"  [Spec] Digest sent — {len(top)} opportunities")
+        return len(top)
+    except requests.RequestException as e:
+        print(f"  [Spec] Digest send failed: {e}")
+        return 0
 
 
 def _format_alert(opp: SpeculativeOpportunity) -> dict:
