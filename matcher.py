@@ -234,12 +234,22 @@ def _nightlife_date(dt):
     night event). Maps those times to the previous calendar day so that
     a Friday-night-into-Saturday-morning show doesn't collide with the
     actual Saturday-night show at the same venue.
+
+    Exception: exactly 00:00:00 is treated as a date-only timestamp,
+    not a real midnight start. Some platforms (notably Gametime) encode
+    JSON-LD startDate without a time component, which dateparser parses
+    as 00:00:00. Shifting those to the previous day produces off-by-one
+    false matches against actual previous-evening events. Real midnight
+    launches are rare; bias toward calendar-day correctness.
     """
     if dt is None:
         return None
     d = dt.date() if hasattr(dt, 'date') else dt
-    if hasattr(dt, 'hour') and dt.hour < NIGHTLIFE_END_HOUR:
-        return d - timedelta(days=1)
+    if hasattr(dt, 'hour'):
+        if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+            return d  # date-only encoding — keep calendar day
+        if dt.hour < NIGHTLIFE_END_HOUR:
+            return d - timedelta(days=1)
     return d
 
 
@@ -389,6 +399,48 @@ def _cities_match(city1: str, city2: str) -> bool:
     return fuzz.ratio(c1, c2) >= 80
 
 
+# Venues that are the same physical place under different platform-facing names.
+# Each tuple lists strings that should be treated as equivalent. Substring
+# matching is the primary signal; this table covers cross-platform aliases that
+# don't share a substring (e.g. "Brooklyn Mirage" is a stage inside the
+# "Avant Gardner" complex but they're listed separately on different platforms).
+_VENUE_ALIASES = [
+    {"brooklyn mirage", "avant gardner"},
+    {"msg", "madison square garden"},
+    {"the forum", "kia forum"},
+    {"radio city", "radio city music hall"},
+]
+
+
+def _venues_match(venue1: str, venue2: str) -> bool:
+    """Check if two venue names refer to the same physical place.
+
+    Substring matching first ("Brooklyn Mirage" vs "The Brooklyn Mirage"
+    both refer to the same venue), then a small alias table for known
+    cross-platform synonyms.
+
+    Returns True when either side is missing — we don't reject when
+    upstream data is incomplete, but we do reject when both sides have
+    venues and they clearly differ.
+    """
+    if not venue1 or not venue2:
+        return True  # missing data — can't disprove, allow through
+
+    v1 = venue1.lower().strip()
+    v2 = venue2.lower().strip()
+
+    if v1 == v2 or v1 in v2 or v2 in v1:
+        return True
+
+    for alias_set in _VENUE_ALIASES:
+        v1_match = any(a in v1 for a in alias_set)
+        v2_match = any(a in v2 for a in alias_set)
+        if v1_match and v2_match:
+            return True
+
+    return False
+
+
 def match_seatgeek(
     cv_event: CrowdVoltEvent,
     sg_events: list[SeatGeekEvent],
@@ -407,6 +459,8 @@ def match_seatgeek(
         if not _dates_match(cv_local_date, sg.event_date):
             continue
         if not _cities_match(cv_event.city, sg.city):
+            continue
+        if not _venues_match(cv_event.venue, sg.venue):
             continue
         if sg.lowest_price is None:
             continue
@@ -455,6 +509,8 @@ def match_tickpick(
             continue
         if not _cities_match(cv_event.city, tp.city):
             continue
+        if not _venues_match(cv_event.venue, tp.venue):
+            continue
         if tp.low_price is None:
             continue
 
@@ -501,6 +557,8 @@ def match_stubhub(
         if not _dates_match(cv_local_date, sh.event_date):
             continue
         if not _cities_match(cv_event.city, sh.city):
+            continue
+        if not _venues_match(cv_event.venue, sh.venue):
             continue
         if sh.min_price is None:
             continue
@@ -555,6 +613,8 @@ def match_vividseats(
             continue
         if not _cities_match(cv_event.city, vs.city):
             continue
+        if not _venues_match(cv_event.venue, vs.venue):
+            continue
         if vs.min_price is None:
             continue
 
@@ -607,6 +667,8 @@ def match_gametime(
         if not _dates_match(cv_local_date, gt.event_date):
             continue
         if not _cities_match(cv_event.city, gt.city):
+            continue
+        if not _venues_match(cv_event.venue, gt.venue):
             continue
         if gt.min_price is None:
             continue
