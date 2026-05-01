@@ -26,10 +26,12 @@ MIN_PROFIT_MARGIN_PCT = 5
 # Smaller spreads aren't worth the operational overhead of a spec listing.
 MIN_SPEC_PROFIT = 10
 
-# Hour at which the daily CV→3P spec digest fires, in America/New_York.
-# 17 = 5pm. Within this hour the digest sends at most once thanks to
-# per-event cooldown.
-SPEC_DIGEST_HOUR = 17
+# Hours at which the CV→3P spec digest fires, in America/New_York.
+# (13, 17) = 1pm and 5pm. Within each digest hour the message sends at
+# most once thanks to per-event cooldown; events alerted at 1pm don't
+# duplicate at 5pm, but the same opportunity persisting overnight
+# refreshes in the following day's 1pm digest.
+SPEC_DIGEST_HOURS = (13, 17)
 
 # CrowdVolt base URL
 CROWDVOLT_BASE_URL = "https://www.crowdvolt.com"

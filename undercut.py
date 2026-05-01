@@ -37,10 +37,11 @@ SELLER_FEES = {
     "Gametime": 0.10,
 }
 
-# Don't re-alert the same event within this window. 23h (not 24h) ensures
-# tomorrow's digest at the same wall-clock hour clears the cooldown without
-# a clock-precision race.
-ALERT_COOLDOWN_HOURS = 23
+# Don't re-alert the same event within this window. 18h sits between the
+# 4h same-day-digest gap (1pm→5pm) and the 20h next-day cross-digest gap
+# (5pm→1pm next day), so events alerted at 1pm are blocked at 5pm same
+# day but refresh in tomorrow's 1pm digest if they're still around.
+ALERT_COOLDOWN_HOURS = 18
 
 DIGEST_TIMEZONE = ZoneInfo("America/New_York")
 
@@ -437,7 +438,7 @@ def find_opportunities(
 
     Criteria:
     - CrowdVolt has active sellers (min_ask exists) — required to source
-    - At least 1 active CrowdVolt bid — minimal demand signal
+    - At least 2 active CrowdVolt bids — multi-buyer demand confirmation
     - 3P market price > CrowdVolt ask + 3P seller fee (profitable)
     - Estimated profit >= MIN_SPEC_PROFIT
     - Event is within 30 days
@@ -461,9 +462,12 @@ def find_opportunities(
         if cv.min_ask is None:
             continue
 
-        # Need at least one active bid — minimal demand validation
+        # Need at least two active bids — multi-buyer demand confirmation.
+        # A single bid is one cancellation away from being a no-demand event;
+        # spec listing commits to a 3P sale before sourcing, so we want
+        # independent confirmation that demand is real.
         bid_count = len(cv.bids)
-        if bid_count < 1:
+        if bid_count < 2:
             continue
 
         # Must be upcoming
@@ -525,24 +529,31 @@ def find_opportunities(
 # Discord alerts
 # ---------------------------------------------------------------------------
 
-def send_alerts(opportunities: list[SpeculativeOpportunity]) -> int:
-    """Send a daily digest of CV→3P spec opportunities to Discord.
+def _format_digest_hour(hour: int) -> str:
+    """Render a 24h hour as a 12h label, e.g. 13 → '1pm', 17 → '5pm'."""
+    suffix = "am" if hour < 12 else "pm"
+    h12 = hour % 12 or 12
+    return f"{h12}{suffix}"
 
-    Fires only when the local NYC hour equals SPEC_DIGEST_HOUR. All fresh
-    opportunities are batched into a single message, sorted by est_profit
-    and capped at 10 (Discord's per-message embed limit). The 23h per-event
-    cooldown ensures the same event doesn't appear in tomorrow's digest if
-    it's still around — and prevents duplicate sends across the multiple
-    scans that happen within the digest hour.
+
+def send_alerts(opportunities: list[SpeculativeOpportunity]) -> int:
+    """Send a CV→3P spec digest to Discord at each scheduled hour.
+
+    Fires only when the current NYC hour is in SPEC_DIGEST_HOURS (1pm and
+    5pm by default). All fresh opportunities are batched into a single
+    message, sorted by est_profit and capped at 10 (Discord's per-message
+    embed limit). The 18h per-event cooldown prevents an event alerted at
+    1pm from re-appearing at 5pm same day, while still letting it refresh
+    in tomorrow's 1pm digest if conditions still hold.
 
     Returns the number of opportunities included in the digest, or 0 when
-    we're outside the digest window or have nothing fresh to send.
+    we're outside any digest window or have nothing fresh to send.
     """
     if not config.DISCORD_WEBHOOK_URL:
         return 0
 
     now_nyc = datetime.now(DIGEST_TIMEZONE)
-    if now_nyc.hour != config.SPEC_DIGEST_HOUR:
+    if now_nyc.hour not in config.SPEC_DIGEST_HOURS:
         return 0
 
     fresh = [o for o in opportunities
@@ -554,8 +565,9 @@ def send_alerts(opportunities: list[SpeculativeOpportunity]) -> int:
     top = fresh[:10]
 
     date_str = now_nyc.strftime("%b %d")
+    hour_label = _format_digest_hour(now_nyc.hour)
     plural = "ies" if len(fresh) != 1 else "y"
-    summary = (f"🔔 **CV→3P Spec Digest** — {date_str} — "
+    summary = (f"🔔 **CV→3P Spec Digest** — {date_str} {hour_label} — "
                f"{len(fresh)} opportunit{plural}")
     if len(fresh) > 10:
         summary += "  _(showing top 10 by profit)_"
@@ -574,10 +586,11 @@ def send_alerts(opportunities: list[SpeculativeOpportunity]) -> int:
         resp.raise_for_status()
         for opp in top:
             _mark_alerted(opp.crowdvolt_event.slug)
-        print(f"  [Spec] Digest sent — {len(top)} opportunities "
-              f"({len(fresh) - len(top)} more deferred to tomorrow)"
-              if len(fresh) > 10
-              else f"  [Spec] Digest sent — {len(top)} opportunities")
+        if len(fresh) > 10:
+            print(f"  [Spec] {hour_label} digest sent — {len(top)} opps "
+                  f"({len(fresh) - len(top)} deferred)")
+        else:
+            print(f"  [Spec] {hour_label} digest sent — {len(top)} opps")
         return len(top)
     except requests.RequestException as e:
         print(f"  [Spec] Digest send failed: {e}")
