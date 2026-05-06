@@ -52,7 +52,13 @@ def scan_once() -> int:
 
     # Filter out seated venues — section-based pricing makes lowest
     # third-party price meaningless vs CrowdVolt bids for specific sections.
-    SEATED_VENUES = {"barclays center", "madison square garden", "msg"}
+    # The seated_scanner module handles these via section-level matching.
+    SEATED_VENUES = {
+        "barclays center",
+        "madison square garden",
+        "msg",
+        "forest hills stadium",
+    }
     seated = [e for e in cv_events if e.venue and e.venue.lower().strip() in SEATED_VENUES]
     cv_events = [e for e in cv_events if not (e.venue and e.venue.lower().strip() in SEATED_VENUES)]
     if seated:

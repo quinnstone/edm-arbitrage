@@ -354,18 +354,33 @@ MATCH_THRESHOLD = 70  # minimum fuzzy score to consider a match
 # Event names containing these words are not real tickets
 JUNK_KEYWORDS = {"parking", "merch", "merchandise", "shuttle", "camping", "locker"}
 
-# Cities that should be treated as equivalent
+# Cities that should be treated as equivalent.
+# Source platforms (TickPick, Gametime, etc.) often use neighborhood-level
+# city names while CrowdVolt uses metro-level. Each entry maps a
+# neighborhood/satellite to its metro canonical form.
 CITY_ALIASES = {
+    # NYC metro — including Queens neighborhoods and NJ urban core
     "nyc": "new york", "brooklyn": "new york", "queens": "new york",
     "bronx": "new york", "manhattan": "new york", "staten island": "new york",
+    "forest hills": "new york",        # Forest Hills (Queens), e.g. neighborhood-only labels
+    "long island city": "new york",    # LIC venues like Knockdown Center
+    "lic": "new york",
+    "flushing": "new york",            # Citi Field area
+    "astoria": "new york",
+    "harlem": "new york",
+    "east rutherford": "new york",     # MetLife
+    "newark": "new york",              # Prudential Center
+    "jersey city": "new york",
+    "hoboken": "new york",
+    # LA metro
     "la": "los angeles", "hollywood": "los angeles", "inglewood": "los angeles",
     "pasadena": "los angeles", "east los angeles": "los angeles",
+    # Other metros
     "miami beach": "miami", "south beach": "miami", "miami gardens": "miami",
     "sf": "san francisco", "oakland": "san francisco",
     "arlington": "dallas", "fort worth": "dallas", "irving": "dallas",
     "rosemont": "chicago", "tinley park": "chicago", "hoffman estates": "chicago",
     "foxborough": "boston", "foxboro": "boston",
-    "east rutherford": "new york", "newark": "new york",
     "atlantic city": "atlantic city",  # keep distinct from NYC
     "national harbor": "washington", "dc": "washington",
     "paradise": "las vegas", "henderson": "las vegas",
