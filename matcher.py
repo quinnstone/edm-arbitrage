@@ -375,12 +375,17 @@ CITY_ALIASES = {
     # LA metro
     "la": "los angeles", "hollywood": "los angeles", "inglewood": "los angeles",
     "pasadena": "los angeles", "east los angeles": "los angeles",
+    "santa monica": "los angeles", "long beach": "los angeles",
+    "culver city": "los angeles", "burbank": "los angeles",
+    "anaheim": "los angeles",          # Honda Center / House of Blues Anaheim
     # Other metros
     "miami beach": "miami", "south beach": "miami", "miami gardens": "miami",
     "sf": "san francisco", "oakland": "san francisco",
+    "berkeley": "san francisco",       # Greek Theatre Berkeley
     "arlington": "dallas", "fort worth": "dallas", "irving": "dallas",
     "rosemont": "chicago", "tinley park": "chicago", "hoffman estates": "chicago",
     "foxborough": "boston", "foxboro": "boston",
+    "cambridge": "boston",
     "atlantic city": "atlantic city",  # keep distinct from NYC
     "national harbor": "washington", "dc": "washington",
     "paradise": "las vegas", "henderson": "las vegas",
