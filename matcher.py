@@ -372,6 +372,18 @@ CITY_ALIASES = {
     "newark": "new york",              # Prudential Center
     "jersey city": "new york",
     "hoboken": "new york",
+    # Long Island East End / Hamptons — explicitly NOT merged with NYC.
+    # These are 90+ miles from Manhattan and have a distinct (luxury, summer-
+    # resort) ticket market. Self-aliases document the policy so a future
+    # alias addition like "long island" → "new york" doesn't accidentally
+    # sweep them in.
+    "atlantic city": "atlantic city",  # NJ resort/casino market — distinct
+    "montauk": "montauk",
+    "east hampton": "east hampton",
+    "southampton": "southampton",
+    "bridgehampton": "bridgehampton",
+    "sag harbor": "sag harbor",
+    "amagansett": "amagansett",
     # LA metro
     "la": "los angeles", "hollywood": "los angeles", "inglewood": "los angeles",
     "pasadena": "los angeles", "east los angeles": "los angeles",
@@ -386,7 +398,6 @@ CITY_ALIASES = {
     "rosemont": "chicago", "tinley park": "chicago", "hoffman estates": "chicago",
     "foxborough": "boston", "foxboro": "boston",
     "cambridge": "boston",
-    "atlantic city": "atlantic city",  # keep distinct from NYC
     "national harbor": "washington", "dc": "washington",
     "paradise": "las vegas", "henderson": "las vegas",
     "tempe": "phoenix", "scottsdale": "phoenix", "glendale": "phoenix",
