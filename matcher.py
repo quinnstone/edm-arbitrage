@@ -446,13 +446,20 @@ _VENUE_ALIASES = [
 def _venues_match(venue1: str, venue2: str) -> bool:
     """Check if two venue names refer to the same physical place.
 
-    Substring matching first ("Brooklyn Mirage" vs "The Brooklyn Mirage"
-    both refer to the same venue), then a small alias table for known
-    cross-platform synonyms.
+    Three layers, in order:
+      1. Substring — "Brooklyn Mirage" ⊆ "The Brooklyn Mirage"
+      2. Alias table — "Brooklyn Mirage" ↔ "Avant Gardner"
+      3. Fuzz ratio >= 85 — catches typos and abbreviations like
+         "Madison Sq Garden" vs "Madison Square Garden"
 
-    Returns True when either side is missing — we don't reject when
-    upstream data is incomplete, but we do reject when both sides have
-    venues and they clearly differ.
+    The fuzz threshold is high (85) because venue substrings often share
+    prefixes ("Brooklyn Steel" vs "Brooklyn Bowl" scores 74 — different
+    venues, correctly rejected). Combined with the upstream name + date
+    + city gates, false positives from fuzz are vanishingly rare: same
+    artist on same date in same metro at near-identically-named venues
+    requires bilocation.
+
+    Returns True when either side is missing.
     """
     if not venue1 or not venue2:
         return True  # missing data — can't disprove, allow through
@@ -469,7 +476,8 @@ def _venues_match(venue1: str, venue2: str) -> bool:
         if v1_match and v2_match:
             return True
 
-    return False
+    # Final fallback: fuzz at high threshold to catch typos / abbreviations
+    return fuzz.ratio(v1, v2) >= 85
 
 
 def match_seatgeek(
