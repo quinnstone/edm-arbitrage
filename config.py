@@ -33,6 +33,19 @@ MIN_SPEC_PROFIT = 10
 # refreshes in the following day's 1pm digest.
 SPEC_DIGEST_HOURS = (13, 17)
 
+# Ticket Radar — availability + code scanner. Runs every 6h via cron.
+# Profit floor is the minimum after-fee net to surface; $1 = wide net.
+TICKET_RADAR_PROFIT_FLOOR = 1
+
+# Subreddit Ticket Radar scrapes for code candidates. Posts here often
+# include presale and access codes for NYC EDM events.
+TICKET_RADAR_SUBREDDIT = "avesNYC_tix"
+
+# Manually-supplied codes. Populate from your private channels (newsletter
+# emails, Discord drops, etc.) — these get tested against every event in
+# the radar pool. Codes here bypass the noise filter and always validate.
+KNOWN_CODES: list[str] = []
+
 # CrowdVolt base URL
 CROWDVOLT_BASE_URL = "https://www.crowdvolt.com"
 
