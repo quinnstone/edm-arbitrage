@@ -12,6 +12,8 @@ imports but does NOT depend on the main arbitrage pipeline or promo scanner.
 """
 
 import argparse
+import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -63,6 +65,52 @@ PRICE_RE = re.compile(
 )
 
 MATCH_THRESHOLD = 70
+
+# Per-(listing, event) cooldown so the same opportunity isn't re-alerted on
+# every main.scan_once run (every 15 min). 23h matches the project convention
+# (undercut.py / ticket_radar.py) so tomorrow's same-clock-hour scan reliably
+# clears the cooldown.
+_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+SENT_ALERTS_FILE = os.path.join(_DATA_DIR, "reddit_tix_sent.json")
+COOLDOWN_HOURS = 23
+
+
+def _load_sent() -> dict:
+    try:
+        with open(SENT_ALERTS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_sent(data: dict) -> None:
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    cutoff = (datetime.now() - timedelta(hours=COOLDOWN_HOURS * 2)).isoformat()
+    data = {k: v for k, v in data.items() if v > cutoff}
+    with open(SENT_ALERTS_FILE, "w") as f:
+        json.dump(data, f)
+
+
+def _alert_key(listing_url: str, cv_slug: str) -> str:
+    """Stable dedup key for a (listing, CV event) pair."""
+    return f"{listing_url}|{cv_slug}"
+
+
+def _was_recently_alerted(key: str) -> bool:
+    sent = _load_sent()
+    last = sent.get(key)
+    if not last:
+        return False
+    try:
+        return datetime.now() - datetime.fromisoformat(last) < timedelta(hours=COOLDOWN_HOURS)
+    except (ValueError, TypeError):
+        return False
+
+
+def _mark_alerted(key: str) -> None:
+    sent = _load_sent()
+    sent[key] = datetime.now().isoformat()
+    _save_sent(sent)
 
 
 @dataclass
@@ -411,8 +459,22 @@ def send_digest(
         return False
 
 
-def scan(dry_run: bool = False, cv_events: list = None) -> list[RedditArbitrage]:
-    """Run the full Reddit ticket scan."""
+def scan(
+    dry_run: bool = False,
+    cv_events: list = None,
+    quiet_if_empty: bool = False,
+) -> list[RedditArbitrage]:
+    """Run the full Reddit ticket scan.
+
+    Args:
+        dry_run: Preview without sending Discord alerts.
+        cv_events: Optional pre-fetched CV catalog. Fetches if None.
+        quiet_if_empty: If True, skip the Discord digest when zero fresh
+            opportunities remain after cooldown filtering. Used when called
+            every 15 min from main.scan_once so we don't spam the channel.
+            When False (daily default), still sends a heartbeat "no arb
+            today" message.
+    """
     print(f"\n{'='*60}")
     print(f"[Reddit Tix] Starting scan at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
@@ -441,17 +503,33 @@ def scan(dry_run: bool = False, cv_events: list = None) -> list[RedditArbitrage]
 
     # Match against CrowdVolt
     opportunities = match_listings(listings, cv_events)
-    print(f"\n[Reddit Tix] {len(opportunities)} arbitrage opportunities")
+    print(f"\n[Reddit Tix] {len(opportunities)} arbitrage opportunities (before dedup)")
 
     for opp in opportunities:
         print(f"  {opp.crowdvolt_event.name}: "
               f"Reddit ${opp.reddit_price:.0f} → CrowdVolt bid ${opp.crowdvolt_bid:.0f} "
               f"(+${opp.profit:.0f})")
 
-    if not dry_run:
-        send_digest(opportunities, len(listings), len(priced))
+    # Cooldown filter — drop opportunities we've alerted in the last
+    # COOLDOWN_HOURS so 15-min scans don't repeat the same listing.
+    fresh = [
+        o for o in opportunities
+        if not _was_recently_alerted(_alert_key(o.listing.url, o.crowdvolt_event.slug))
+    ]
+    if len(fresh) < len(opportunities):
+        print(f"[Reddit Tix] {len(fresh)} fresh after {COOLDOWN_HOURS}h cooldown "
+              f"({len(opportunities) - len(fresh)} suppressed as recently alerted)")
 
-    return opportunities
+    if not dry_run:
+        # When called frequently with quiet_if_empty=True, skip the empty-state
+        # heartbeat — but still send when we have fresh opportunities.
+        if fresh or not quiet_if_empty:
+            sent = send_digest(fresh, len(listings), len(priced))
+            if sent:
+                for opp in fresh:
+                    _mark_alerted(_alert_key(opp.listing.url, opp.crowdvolt_event.slug))
+
+    return fresh
 
 
 def main():

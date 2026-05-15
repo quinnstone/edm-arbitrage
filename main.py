@@ -43,6 +43,11 @@ def scan_once() -> int:
     if past_events:
         print(f"[Scan] Filtered out {len(past_events)} past events")
 
+    # Snapshot the upcoming catalog before the DICE/seated filters drop it.
+    # The Reddit ticket scanner (called below) can source DICE and seated
+    # tickets directly via fan-to-fan transfer, so it needs the broader set.
+    upcoming_events = list(cv_events)
+
     # Filter out DICE-only events — tickets require in-app transfer
     # and can't be fulfilled with third-party QR codes from StubHub, etc.
     dice_events = [e for e in cv_events if e.ticket_platform.upper() == "DICE"]
@@ -211,6 +216,28 @@ def scan_once() -> int:
     for slug, opps in by_event.items():
         notifier.send_alert(opps)
         time.sleep(1)  # respect Discord rate limits
+
+    # Step 3b: Reddit ticket scan — treat r/avesNYC_tix selling posts as
+    # another acquisition source. Buy on Reddit at face/below-face, fill
+    # CV bids. Uses the broader catalog (DICE + seated included) since
+    # Reddit users can sell those directly via in-app transfer. NYC-only
+    # because the subreddit is NYC-specific. Wrapped in try/except so a
+    # Reddit failure can't break the main scan. quiet_if_empty=True
+    # suppresses the heartbeat "no arb today" digest at 15-min cadence —
+    # the daily groupme_scanner run still emits that for visibility.
+    try:
+        import reddit_tix_scanner
+        import matcher as _matcher
+        nyc_events = [
+            e for e in upcoming_events
+            if e.max_bid is not None and _matcher._cities_match(e.city, "New York")
+        ]
+        reddit_tix_scanner.scan(
+            cv_events=nyc_events,
+            quiet_if_empty=True,
+        )
+    except Exception as e:
+        print(f"[Reddit Tix] Inline scan failed (main scan continues): {e}")
 
     # Step 4: Track bid/ask snapshots and evaluate speculative opportunities.
     undercut.save_bid_snapshot(cv_events)
