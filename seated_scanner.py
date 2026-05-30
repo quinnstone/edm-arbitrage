@@ -29,7 +29,7 @@ from playwright.sync_api import sync_playwright
 import config
 import crowdvolt
 import tickpick
-from matcher import _name_similarity, _localize_cv_date, search_queries
+from matcher import _name_similarity, _localize_cv_date, _dates_match, search_queries
 
 # Venues where tickets are sold by section — the main scanner skips these
 SEATED_VENUES = {
@@ -40,7 +40,13 @@ SEATED_VENUES = {
 }
 
 # Slug keywords to find seated events in the CrowdVolt sitemap
-_SEATED_SLUG_KEYWORDS = ["barclays", "madison-square", "forest-hills", "msg"]
+_SEATED_SLUG_KEYWORDS = [
+    "barclays",          # Barclays Center, Brooklyn
+    "madison-square",    # Madison Square Garden, NYC
+    "msg",               # MSG alias
+    "forest-hills",      # Forest Hills Stadium, Queens
+    "huntington-bank",   # Huntington Bank Pavilion, Chicago (Northerly Island)
+]
 
 # How often to scan in loop mode (minutes)
 SEATED_SCAN_INTERVAL = 30
@@ -173,10 +179,13 @@ def _find_tickpick_event(
             if not venue_ok:
                 continue
 
-            # --- Date check (exact day) ---
+            # --- Date check — centralized on nightlife semantics ---
+            # Uses _dates_match so a TP listing stored as next-day-1am
+            # (when the actual show is the prior evening's afters) doesn't
+            # falsely reject. Same fix pattern as the main matchers.
             if not tp.event_date or not cv_local:
-                continue  # can't confirm without both dates
-            if tp.event_date.date() != cv_local.date():
+                continue
+            if not _dates_match(cv_local, tp.event_date):
                 continue
 
             print(f"  [TickPick] Matched: {tp.name} @ {tp.venue} "
