@@ -17,11 +17,13 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import requests
 from playwright.sync_api import sync_playwright
@@ -30,6 +32,13 @@ import config
 import crowdvolt
 import tickpick
 from matcher import _name_similarity, _localize_cv_date, _dates_match, search_queries
+
+# Persistent state directory (shared with other scanners)
+_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+_SEATED_SPEC_SENT_FILE = os.path.join(_DATA_DIR, "seated_spec_sent.json")
+_SEATED_SPEC_COOLDOWN_HOURS = 18  # matches undercut's dual-digest cadence
+_SEATED_SPEC_DIGEST_TZ = ZoneInfo("America/New_York")
+_TICKPICK_SELLER_FEE = 0.10  # TickPick takes ~10% from sellers
 
 # Venues where tickets are sold by section — the main scanner skips these
 SEATED_VENUES = {
@@ -54,8 +63,13 @@ SEATED_SCAN_INTERVAL = 30
 # Section name aliases — maps platform-specific names to a common key.
 # normalize_section() canonicalizes "General Admission" → "GA" before
 # this lookup runs, so both spellings hit the same entries.
+#
+# Design principle: bucket spelling variants of the SAME physical area
+# (e.g. "Lawn", "GA Lawn", "Reserved Lawn" all = the lawn area), but
+# keep distinct areas distinct (Lawn ≠ Pit ≠ Box) because they have
+# different prices and a buyer expecting one will reject the other.
 _SECTION_ALIASES = {
-    # CrowdVolt-style
+    # Bowl venue GA (Barclays / MSG / Forest Hills) — floor standing
     "front ga": "front_ga",
     "back ga": "back_ga",
     "rear ga": "back_ga",  # rear == back
@@ -64,12 +78,44 @@ _SECTION_ALIASES = {
     "ga floor": "floor_ga",
     "ga bowl": "bowl_ga",
     "floor": "floor",
-    "pit": "pit",
-    # TickPick-style
     "front floor ga": "front_ga",
     "rear floor ga": "back_ga",
     "floor ga": "floor_ga",
     "ga": "ga",
+    # Amphitheater PIT — premium standing area in front of stage
+    "pit": "pit",
+    "ga pit": "pit",
+    "pit ga": "pit",
+    # Amphitheater LAWN — grass area, all considered same physical area
+    "lawn": "lawn",
+    "ga lawn": "lawn",
+    "lawn ga": "lawn",
+    "reserved lawn": "lawn",
+    "general lawn": "lawn",
+    # Lawn sub-areas (front vs back of lawn) — distinct prices
+    "front lawn": "front_lawn",
+    "lawn front": "front_lawn",
+    "back lawn": "back_lawn",
+    "lawn back": "back_lawn",
+    "rear lawn": "back_lawn",
+    "lawn rear": "back_lawn",
+    # Amphitheater BOX — premium covered seating
+    "box": "box",
+    "ga box": "box",
+    "pavilion box": "box",
+    "box seats": "box",
+}
+
+# Position qualifiers — words that mean "this GA is a specific physical
+# area, not generic GA." When present in a section name, the wide GA
+# bucketing rule (^ga\b → ga) should NOT apply. The alias table above
+# handles the actual mapping; this list just keeps the wide rule from
+# overcollapsing things like "GA Lawn" or "GA Pit" into bare "ga".
+_POSITION_QUALIFIERS = {
+    "lawn", "pit", "box", "bowl", "floor",
+    "front", "back", "rear", "side",
+    "balcony", "mezzanine", "mezz", "loge",
+    "pavilion", "field", "deck",
 }
 
 
@@ -124,10 +170,16 @@ def normalize_section(raw: str) -> str:
 
     # Bucket unrecognized GA-prefix variants (GA+, GA Plus, GA Premium, etc.)
     # to plain "ga" — these are vendor-specific spellings of the same tier,
-    # not real tier upgrades. Structured GA variants (Front/Back/Floor/Bowl)
-    # are caught by the alias table above before this runs.
+    # not real tier upgrades. SKIP this collapse when a position qualifier
+    # is present (e.g. "GA Lawn", "GA Pit") — those are physically distinct
+    # areas with different prices, not just spelling variants of generic GA.
+    # The alias table above maps known venue-specific GA areas; this rule
+    # only fires for things like "GA Standing" / "GA Plus" that have no
+    # position qualifier.
     if re.match(r"^ga\b", lower):
-        return "ga"
+        rest = lower[2:].strip()
+        if not any(q in rest.split() for q in _POSITION_QUALIFIERS):
+            return "ga"
 
     # Fallback — return cleaned lowercase
     return re.sub(r"[^a-z0-9]+", "_", lower).strip("_")
@@ -326,6 +378,201 @@ def find_section_arbitrage(
 
 
 # ---------------------------------------------------------------------------
+# Section-level speculative listing (CV → TP direction)
+# ---------------------------------------------------------------------------
+# Mirror of find_section_arbitrage but inverted: list on TickPick at the
+# section's market price, source from CrowdVolt at a cheaper ask. Same
+# section-matching machinery as forward arb, opposite price direction.
+
+@dataclass
+class SeatedSpecOpportunity:
+    crowdvolt_event: crowdvolt.CrowdVoltEvent
+    section: str            # normalized section key
+    cv_ask_price: float     # what we'd pay on CV
+    tp_price: float         # what buyers pay on TP (our listing price)
+    est_payout: float       # tp_price * (1 - seller_fee)
+    est_profit: float       # payout - cv_ask_price
+    margin_pct: float
+    days_until: Optional[int]
+    tp_section_raw: str     # original TP section string
+    cv_section_raw: str     # original CV ticket_type string
+    tp_url: str
+    ask_count_at_section: int  # supply cushion at this section
+
+
+def find_section_spec_arbitrage(
+    cv_event: crowdvolt.CrowdVoltEvent,
+    tp_listings: list[SectionListing],
+    tp_url: str,
+) -> list[SeatedSpecOpportunity]:
+    """Spec direction: sell on TP at market section price, source from CV
+    ask at the same section.
+
+    Requirements:
+    - Event within 14 days (config.SPEC_DIGEST_HOURS-aligned horizon)
+    - Section has 3+ CV asks (ample sourcing cushion)
+    - profit >= config.MIN_SPEC_PROFIT after 10% TickPick seller fee
+    """
+    today = datetime.now().date()
+
+    # Horizon check
+    cv_local = _localize_cv_date(cv_event)
+    days_until = None
+    if cv_local:
+        days_until = (cv_local.date() - today).days
+        if days_until > 14 or days_until < 0:
+            return []
+
+    # Group CV asks by normalized section
+    asks_by_section: dict[str, list] = {}
+    for ask in cv_event.asks:
+        key = normalize_section(ask.ticket_type)
+        asks_by_section.setdefault(key, []).append(ask)
+
+    # Cheapest TP listing per section
+    tp_cheapest: dict[str, SectionListing] = {}
+    for listing in tp_listings:
+        key = listing.section_norm
+        if key not in tp_cheapest or listing.price < tp_cheapest[key].price:
+            tp_cheapest[key] = listing
+
+    opportunities = []
+    for section_key, asks in asks_by_section.items():
+        if section_key not in tp_cheapest:
+            continue
+        if len(asks) < 3:
+            continue  # ample-cushion gate
+
+        cheapest_ask = min(asks, key=lambda a: a.all_in_price)
+        tp = tp_cheapest[section_key]
+        payout = tp.price * (1 - _TICKPICK_SELLER_FEE)
+        profit = payout - cheapest_ask.all_in_price
+
+        if profit < config.MIN_SPEC_PROFIT:
+            continue
+
+        margin = (profit / cheapest_ask.all_in_price) * 100
+
+        opportunities.append(SeatedSpecOpportunity(
+            crowdvolt_event=cv_event,
+            section=section_key,
+            cv_ask_price=cheapest_ask.all_in_price,
+            tp_price=tp.price,
+            est_payout=round(payout, 2),
+            est_profit=round(profit, 2),
+            margin_pct=round(margin, 1),
+            days_until=days_until,
+            tp_section_raw=tp.section,
+            cv_section_raw=cheapest_ask.ticket_type,
+            tp_url=tp_url,
+            ask_count_at_section=len(asks),
+        ))
+
+    opportunities.sort(key=lambda o: o.est_profit, reverse=True)
+    return opportunities
+
+
+def _spec_was_recently_alerted(slug: str, section: str) -> bool:
+    try:
+        with open(_SEATED_SPEC_SENT_FILE) as f:
+            sent = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    last = sent.get(f"{slug}:{section}")
+    if not last:
+        return False
+    try:
+        return datetime.now() - datetime.fromisoformat(last) < timedelta(hours=_SEATED_SPEC_COOLDOWN_HOURS)
+    except (ValueError, TypeError):
+        return False
+
+
+def _spec_mark_alerted(slug: str, section: str) -> None:
+    try:
+        with open(_SEATED_SPEC_SENT_FILE) as f:
+            sent = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        sent = {}
+    sent[f"{slug}:{section}"] = datetime.now().isoformat()
+    cutoff = (datetime.now() - timedelta(hours=_SEATED_SPEC_COOLDOWN_HOURS * 2)).isoformat()
+    sent = {k: v for k, v in sent.items() if v > cutoff}
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    with open(_SEATED_SPEC_SENT_FILE, "w") as f:
+        json.dump(sent, f)
+
+
+def _format_spec_embed(opp: SeatedSpecOpportunity) -> dict:
+    cv = opp.crowdvolt_event
+    cv_local = _localize_cv_date(cv) if cv.event_date else None
+    date_str = (cv_local or cv.event_date).strftime("%b %d, %Y") if cv.event_date else "TBD"
+    days_label = f"{opp.days_until} days out" if opp.days_until is not None else ""
+
+    return {
+        "title": f"🏟️ {cv.name} — {opp.cv_section_raw}",
+        "description": f"{cv.venue} — {cv.city} — {date_str}",
+        "color": 0x8B5CF6,  # purple — distinct from forward-arb green / GA-spec orange
+        "fields": [
+            {"name": "Section", "value": f"`{opp.section}`", "inline": True},
+            {"name": "Sell on TP / Source CV",
+             "value": f"${opp.tp_price:.0f} / ${opp.cv_ask_price:.0f}",
+             "inline": True},
+            {"name": "Est. Profit",
+             "value": f"**+${opp.est_profit:.0f}** ({opp.margin_pct:.0f}%)",
+             "inline": True},
+            {"name": "Supply cushion",
+             "value": f"{opp.ask_count_at_section} CV asks at this section · {days_label}",
+             "inline": False},
+            {"name": "Links",
+             "value": f"[TickPick]({opp.tp_url}) | [CrowdVolt]({cv.url})",
+             "inline": False},
+        ],
+    }
+
+
+def send_spec_digest(opportunities: list[SeatedSpecOpportunity]) -> int:
+    """Section-level spec digest. Gated on config.SPEC_DIGEST_HOURS in NYC time
+    so it lands alongside the GA-level spec digest from undercut.py."""
+    if not config.DISCORD_WEBHOOK_URL or not opportunities:
+        return 0
+
+    now_nyc = datetime.now(_SEATED_SPEC_DIGEST_TZ)
+    if now_nyc.hour not in config.SPEC_DIGEST_HOURS:
+        return 0
+
+    fresh = [o for o in opportunities
+             if not _spec_was_recently_alerted(o.crowdvolt_event.slug, o.section)]
+    if not fresh:
+        return 0
+
+    fresh.sort(key=lambda o: o.est_profit, reverse=True)
+    top = fresh[:10]
+
+    date_str = now_nyc.strftime("%b %d %I%p").lstrip("0").replace(" 0", " ")
+    plural = "ies" if len(fresh) != 1 else "y"
+    summary = (f"🏟️ **Stadium/Arena Spec Digest** — {date_str} — "
+               f"{len(fresh)} section opportunit{plural}")
+    if len(fresh) > 10:
+        summary += "  _(showing top 10 by profit)_"
+
+    payload = {
+        "username": "Ticket Arb",
+        "content": summary,
+        "embeds": [_format_spec_embed(o) for o in top],
+    }
+    try:
+        resp = requests.post(config.DISCORD_WEBHOOK_URL, json=payload,
+                             timeout=config.REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        for o in top:
+            _spec_mark_alerted(o.crowdvolt_event.slug, o.section)
+        print(f"  [Seated Spec] Digest sent — {len(top)} section opps")
+        return len(top)
+    except requests.RequestException as e:
+        print(f"  [Seated Spec] Digest send failed: {e}")
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # Discord notifications
 # ---------------------------------------------------------------------------
 
@@ -451,24 +698,31 @@ def scan_once(dry_run: bool = False) -> int:
         ask_info = f"min ask ${e.min_ask:.0f}" if e.min_ask else "no asks"
         print(f"  {e.name} @ {e.venue} — {bid_info}, {ask_info}")
 
-    # Only process events with active bids
-    bid_events = [e for e in seated_events if e.bids]
-    print(f"[Seated] {len(bid_events)} have active buyers")
+    # Process events with bids (forward arb) OR asks (spec listing). Same
+    # TP fetch supports both directions, so doing them together is efficient.
+    active_events = [e for e in seated_events if e.bids or e.asks]
+    bid_events = [e for e in active_events if e.bids]
+    ask_events = [e for e in active_events if e.asks]
+    print(f"[Seated] {len(bid_events)} have bids (forward arb), "
+          f"{len(ask_events)} have asks (spec listing)")
 
-    if not bid_events:
-        print("[Seated] No seated events with bids — nothing to scan")
+    if not active_events:
+        print("[Seated] No seated events with market activity — nothing to scan")
         if not dry_run:
             send_summary(0, 0, 0, 0)
         return 0
 
     all_opportunities = []
+    all_spec_opportunities = []
     matched_count = 0
     errors = 0
 
-    for cv_event in bid_events:
+    for cv_event in active_events:
         print(f"\n[Seated] {cv_event.name} @ {cv_event.venue}")
         for bid in cv_event.bids:
             print(f"  Bid: [{bid.ticket_type}] ${bid.all_in_price:.0f} x{bid.qty}")
+        if cv_event.asks:
+            print(f"  Asks: {len(cv_event.asks)} sellers (min ${cv_event.min_ask:.0f})")
 
         # Find matching TickPick event
         try:
@@ -506,22 +760,37 @@ def scan_once(dry_run: bool = False) -> int:
         print(f"  [TickPick] {len(tp_listings)} listings across "
               f"{len(sections)} sections")
 
-        # Compare per section
-        opps = find_section_arbitrage(cv_event, tp_listings, tp_event.url)
+        # Forward arb: TP cheap → fill CV bid. Only when event has bids.
+        if cv_event.bids:
+            opps = find_section_arbitrage(cv_event, tp_listings, tp_event.url)
+            if opps:
+                print(f"  [Forward arb: {len(opps)} opportunities]")
+                for opp in opps:
+                    print(f"    [{opp.cv_section_raw}] TP ${opp.tp_price:.0f} "
+                          f"→ CV bid ${opp.cv_bid_price:.0f} = "
+                          f"+${opp.profit:.0f}")
+                all_opportunities.extend(opps)
+            else:
+                print("  No forward-arb section opportunities")
 
-        if opps:
-            print(f"  [{len(opps)} opportunities]")
-            for opp in opps:
-                print(f"    [{opp.cv_section_raw}] TP ${opp.tp_price:.0f} "
-                      f"→ CV bid ${opp.cv_bid_price:.0f} = "
-                      f"+${opp.profit:.0f}")
-            all_opportunities.extend(opps)
-        else:
-            print("  No section-level arbitrage")
+        # Spec listing: sell on TP at section market → source from CV ask.
+        # Only when event has asks (need CV sellers to source from).
+        if cv_event.asks:
+            spec_opps = find_section_spec_arbitrage(
+                cv_event, tp_listings, tp_event.url)
+            if spec_opps:
+                print(f"  [Spec listing: {len(spec_opps)} opportunities]")
+                for opp in spec_opps:
+                    print(f"    [{opp.cv_section_raw}] CV ${opp.cv_ask_price:.0f} "
+                          f"→ TP ${opp.tp_price:.0f} = +${opp.est_profit:.0f} "
+                          f"({opp.ask_count_at_section} CV asks cushion)")
+                all_spec_opportunities.extend(spec_opps)
+            else:
+                print("  No section-level spec opportunities")
 
         time.sleep(1)  # pace requests
 
-    # Send alerts grouped by event
+    # Send forward-arb alerts (per event, per scan — short-lived opps)
     if not dry_run:
         by_event: dict[str, list[SeatedOpportunity]] = {}
         for opp in all_opportunities:
@@ -532,11 +801,16 @@ def scan_once(dry_run: bool = False) -> int:
             send_alert(opps)
             time.sleep(1)
 
+        # Send spec digest (only fires at 1pm/5pm NYC hours, deduped)
+        if all_spec_opportunities:
+            send_spec_digest(all_spec_opportunities)
+
         send_summary(len(bid_events), matched_count,
                      len(all_opportunities), errors)
 
-    print(f"\n[Seated] Done — {len(all_opportunities)} opportunities")
-    return len(all_opportunities)
+    print(f"\n[Seated] Done — {len(all_opportunities)} forward-arb opps, "
+          f"{len(all_spec_opportunities)} spec opps")
+    return len(all_opportunities) + len(all_spec_opportunities)
 
 
 def main():
