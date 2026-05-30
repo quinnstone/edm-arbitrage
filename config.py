@@ -23,8 +23,9 @@ SCAN_INTERVAL_MINUTES = 15
 MIN_PROFIT_MARGIN_PCT = 5
 
 # Minimum estimated profit (dollars) for a CV→3P spec listing alert.
-# Smaller spreads aren't worth the operational overhead of a spec listing.
-MIN_SPEC_PROFIT = 10
+# Spec listing has operational overhead and risk (sourcing window between
+# the 3P sale and CV purchase). $20+ ensures the alert is worth acting on.
+MIN_SPEC_PROFIT = 20
 
 # Hours at which the CV→3P spec digest fires, in America/New_York.
 # (13, 17) = 1pm and 5pm. Within each digest hour the message sends at

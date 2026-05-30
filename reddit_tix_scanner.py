@@ -26,7 +26,7 @@ from thefuzz import fuzz
 
 import config
 import crowdvolt
-from matcher import extract_artist_name, _name_similarity, _localize_cv_date
+from matcher import extract_artist_name, _name_similarity, _localize_cv_date, _dates_match
 
 HEADERS = {
     "User-Agent": (
@@ -257,69 +257,105 @@ def _parse_date_from_text(text: str) -> Optional[datetime]:
     return None
 
 
+def _fetch_subreddit_posts(sub: str, limit: int = 50) -> list[dict]:
+    """Fetch recent posts from a subreddit. Tries reddit.com first, then
+    falls back to PullPush (third-party mirror with identical Reddit schema)
+    if Reddit returns 403/429 — common on shared/cloud IPs.
+
+    Returns a list of post dicts in Reddit's submission schema.
+    """
+    # Primary: reddit.com
+    try:
+        resp = requests.get(
+            f"https://www.reddit.com/r/{sub}/new.json",
+            params={"limit": limit},
+            headers=HEADERS,
+            timeout=config.REQUEST_TIMEOUT,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return [child.get("data", {}) for child in data.get("data", {}).get("children", [])]
+        if resp.status_code not in (403, 429):
+            print(f"  [Reddit Tix] r/{sub}: HTTP {resp.status_code}")
+            return []
+        print(f"  [Reddit Tix] r/{sub}: HTTP {resp.status_code}, falling back to PullPush")
+    except requests.RequestException as e:
+        print(f"  [Reddit Tix] r/{sub} reddit.com error: {e}, falling back to PullPush")
+
+    # Fallback: PullPush mirror — same Reddit submission schema, no auth needed
+    try:
+        resp = requests.get(
+            "https://api.pullpush.io/reddit/submission/search/",
+            params={
+                "subreddit": sub,
+                "size": limit,
+                "sort": "desc",
+                "sort_type": "created_utc",
+            },
+            headers=HEADERS,
+            timeout=config.REQUEST_TIMEOUT,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("data", [])
+        print(f"  [Reddit Tix] r/{sub} PullPush: HTTP {resp.status_code}")
+    except requests.RequestException as e:
+        print(f"  [Reddit Tix] r/{sub} PullPush error: {e}")
+
+    return []
+
+
 def fetch_listings(lookback_days: int = 7) -> list[RedditListing]:
     """Fetch selling posts from ticket exchange subreddits."""
     cutoff = time.time() - (lookback_days * 24 * 60 * 60)
     all_listings = []
 
     for sub in TICKET_SUBREDDITS:
-        try:
-            resp = requests.get(
-                f"https://www.reddit.com/r/{sub}/new.json",
-                params={"limit": 50},
-                headers=HEADERS,
-                timeout=config.REQUEST_TIMEOUT,
-            )
-            if resp.status_code != 200:
-                print(f"  [Reddit Tix] r/{sub}: HTTP {resp.status_code}")
+        posts = _fetch_subreddit_posts(sub, limit=50)
+        if not posts:
+            continue
+
+        for d in posts:
+            # Age filter
+            created = d.get("created_utc", 0)
+            if created < cutoff:
                 continue
 
-            data = resp.json()
-            for post in data.get("data", {}).get("children", []):
-                d = post.get("data", {})
+            # Flair filter
+            flair = (d.get("link_flair_text") or "").lower().strip()
+            if flair in SKIP_FLAIRS:
+                continue
 
-                # Age filter
-                created = d.get("created_utc", 0)
-                if created < cutoff:
-                    continue
+            title = d.get("title", "")
+            body = d.get("selftext", "") or ""
 
-                # Flair filter
-                flair = (d.get("link_flair_text") or "").lower().strip()
-                if flair in SKIP_FLAIRS:
-                    continue
+            # Must be a selling post — check flair or title
+            is_selling = flair in SELLING_FLAIRS or bool(SELLING_TITLE_RE.search(title))
+            if not is_selling:
+                continue
 
-                title = d.get("title", "")
-                body = d.get("selftext", "") or ""
+            # Extract price from title first, then body
+            combined = f"{title} {body}"
+            price = _parse_price(title) or _parse_price(body)
+            quantity = _parse_quantity(combined)
+            event_name = _extract_event_name(title, body)
 
-                # Must be a selling post — check flair or title
-                is_selling = flair in SELLING_FLAIRS or bool(SELLING_TITLE_RE.search(title))
-                if not is_selling:
-                    continue
+            if not event_name or len(event_name) < 3:
+                continue
 
-                # Extract price from title first, then body
-                combined = f"{title} {body}"
-                price = _parse_price(title) or _parse_price(body)
-                quantity = _parse_quantity(combined)
-                event_name = _extract_event_name(title, body)
+            listing = RedditListing(
+                title=title,
+                body=body[:300],
+                price=price,
+                quantity=quantity,
+                url=f"https://reddit.com{d.get('permalink', '')}",
+                author=d.get("author", ""),
+                created_utc=created,
+                subreddit=sub,
+                event_name_guess=event_name,
+            )
+            all_listings.append(listing)
 
-                if not event_name or len(event_name) < 3:
-                    continue
-
-                listing = RedditListing(
-                    title=title,
-                    body=body[:300],
-                    price=price,
-                    quantity=quantity,
-                    url=f"https://reddit.com{d.get('permalink', '')}",
-                    author=d.get("author", ""),
-                    created_utc=created,
-                    subreddit=sub,
-                    event_name_guess=event_name,
-                )
-                all_listings.append(listing)
-
-        except requests.RequestException as e:
-            print(f"  [Reddit Tix] r/{sub} error: {e}")
         time.sleep(1)
 
     return all_listings
@@ -347,15 +383,15 @@ def match_listings(
             if score < MATCH_THRESHOLD:
                 continue
 
-            # Date check if we can parse a date from the listing
+            # Date check — centralized on the same nightlife-aware
+            # comparison every other matcher uses. Standardizes Reddit
+            # against TickPick / Gametime / etc. so the same after-midnight
+            # → previous-night semantics apply across the pipeline.
             listing_date = _parse_date_from_text(f"{listing.title} {listing.body}")
             if listing_date and cv.event_date:
                 cv_local = _localize_cv_date(cv)
-                if cv_local:
-                    cv_date = cv_local.date()
-                    listing_d = listing_date.date()
-                    if abs((cv_date - listing_d).days) > 1:
-                        continue
+                if cv_local and not _dates_match(cv_local, listing_date):
+                    continue
 
             if score > best_score:
                 best_score = score

@@ -3,7 +3,7 @@
 import requests
 
 import config
-from matcher import ArbitrageOpportunity
+from matcher import ArbitrageOpportunity, _localize_cv_date
 
 
 def _format_opportunity(opps: list[ArbitrageOpportunity]) -> dict:
@@ -65,7 +65,13 @@ def _format_opportunity(opps: list[ArbitrageOpportunity]) -> dict:
         "inline": False,
     })
 
-    date_str = cv.event_date.strftime("%b %d, %Y") if cv.event_date else "TBD"
+    # Display the venue-local date, not raw UTC. CV stores doors_open_time
+    # as UTC, which rolls into the next calendar day for evening events,
+    # producing a confusing alert where the displayed date doesn't match
+    # the source-platform URL the link goes to (e.g., "May 31" in alert
+    # but ticketmaster link is for the May 30 show).
+    cv_local = _localize_cv_date(cv)
+    date_str = (cv_local or cv.event_date).strftime("%b %d, %Y") if cv.event_date else "TBD"
     platform_str = f" · via {cv.ticket_platform}" if cv.ticket_platform else ""
 
     return {

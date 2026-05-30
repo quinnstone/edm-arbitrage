@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 import config
+import matcher
 from crowdvolt import CrowdVoltEvent
 from matcher import ArbitrageOpportunity
 
@@ -173,9 +174,12 @@ def log_scan_results(
             if ev.min_ask is None and ev.max_bid is None:
                 continue
 
+            # Use venue-local date for days_until and the date field so a
+            # 10pm ET event stored as next-day UTC doesn't show as +1 day.
+            ev_local = matcher._localize_cv_date(ev) if ev.event_date else None
             days_until = None
-            if ev.event_date:
-                days_until = (ev.event_date.date() - today).days
+            if ev_local:
+                days_until = (ev_local.date() - today).days
 
             # Ask depth — the supply picture
             asks = _ask_depth(ev.asks)
@@ -211,7 +215,7 @@ def log_scan_results(
                     "name": ev.name,
                     "venue": ev.venue,
                     "city": ev.city,
-                    "date": ev.event_date.strftime("%Y-%m-%d") if ev.event_date else None,
+                    "date": ev_local.strftime("%Y-%m-%d") if ev_local else (ev.event_date.strftime("%Y-%m-%d") if ev.event_date else None),
                     "platform": ev.ticket_platform,
                     "days_until": days_until,
                 },
@@ -470,11 +474,23 @@ def find_opportunities(
         if bid_count < 2:
             continue
 
-        # Must be upcoming
+        # Need ample CV supply cushion. If only one seller exists, they
+        # could disappear between our 3P listing and the 3P sale, leaving
+        # us unable to fulfill. 3+ asks gives a fallback if the lowest
+        # disappears.
+        ask_count = len(cv.asks)
+        if ask_count < 3:
+            continue
+
+        # Must be coming up in the next couple weeks. Far-out events have
+        # too much variance in both CV asks and 3P prices to make spec
+        # listing reliable; tighter horizon = higher-confidence opps.
+        # Uses venue-local date so late-night events aren't displayed +1.
+        cv_local = matcher._localize_cv_date(cv) if cv.event_date else None
         days_until = None
-        if cv.event_date:
-            days_until = (cv.event_date.date() - today).days
-            if days_until > 30 or days_until < 0:
+        if cv_local:
+            days_until = (cv_local.date() - today).days
+            if days_until > 14 or days_until < 0:
                 continue
 
         bid_trend = get_bid_trend(slug)
@@ -600,7 +616,9 @@ def send_alerts(opportunities: list[SpeculativeOpportunity]) -> int:
 def _format_alert(opp: SpeculativeOpportunity) -> dict:
     """Format a speculative listing opportunity as a Discord embed."""
     cv = opp.crowdvolt_event
-    date_str = cv.event_date.strftime("%b %d, %Y") if cv.event_date else "TBD"
+    # Localize for display so a 10pm ET event doesn't show as +1 day.
+    cv_local = matcher._localize_cv_date(cv) if cv.event_date else None
+    date_str = (cv_local or cv.event_date).strftime("%b %d, %Y") if cv.event_date else "TBD"
 
     # Supply + demand signals
     signals = []

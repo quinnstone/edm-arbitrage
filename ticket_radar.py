@@ -941,7 +941,12 @@ def scan(dry_run: bool = False, cv_events: Optional[list] = None) -> list[Opport
 # ---------------------------------------------------------------------------
 
 def _format_opp_embed(opp: Opportunity) -> dict:
-    date_str = opp.event_date.strftime("%b %d") if opp.event_date else "TBD"
+    # Localize before display so a late-evening event stored as next-day UTC
+    # doesn't show as +1 day.
+    from types import SimpleNamespace
+    proxy = SimpleNamespace(event_date=opp.event_date, city=opp.event_city)
+    cv_local = matcher._localize_cv_date(proxy) if opp.event_date else None
+    date_str = (cv_local or opp.event_date).strftime("%b %d") if opp.event_date else "TBD"
     fields = [
         {"name": "Where", "value": f"{opp.event_venue} — {opp.event_city}", "inline": True},
         {"name": "When", "value": date_str, "inline": True},
