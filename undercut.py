@@ -482,15 +482,15 @@ def find_opportunities(
         if ask_count < 3:
             continue
 
-        # Must be coming up in the next couple weeks. Far-out events have
-        # too much variance in both CV asks and 3P prices to make spec
-        # listing reliable; tighter horizon = higher-confidence opps.
+        # Must be in the future (can't spec-list a past show). No upper
+        # horizon — far-out events still surface so operator sees full
+        # spec landscape; days_until is reported in the alert for context.
         # Uses venue-local date so late-night events aren't displayed +1.
         cv_local = matcher._localize_cv_date(cv) if cv.event_date else None
         days_until = None
         if cv_local:
             days_until = (cv_local.date() - today).days
-            if days_until > 14 or days_until < 0:
+            if days_until < 0:
                 continue
 
         bid_trend = get_bid_trend(slug)

@@ -409,18 +409,19 @@ def find_section_spec_arbitrage(
     ask at the same section.
 
     Requirements:
-    - Event within 14 days (config.SPEC_DIGEST_HOURS-aligned horizon)
+    - Event in the future (past shows can't be spec-listed)
     - Section has 3+ CV asks (ample sourcing cushion)
     - profit >= config.MIN_SPEC_PROFIT after 10% TickPick seller fee
     """
     today = datetime.now().date()
 
-    # Horizon check
+    # Past-event filter only (no upper horizon — far-out arena shows
+    # still produce real opportunities, esp. when CV ask cushion is deep)
     cv_local = _localize_cv_date(cv_event)
     days_until = None
     if cv_local:
         days_until = (cv_local.date() - today).days
-        if days_until > 14 or days_until < 0:
+        if days_until < 0:
             return []
 
     # Group CV asks by normalized section
