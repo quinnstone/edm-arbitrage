@@ -2,9 +2,11 @@ name: Ticket Radar
 
 on:
   schedule:
-    # Every 6 hours: 00:00, 06:00, 12:00, 18:00 UTC.
-    # Roughly 8pm/2am/8am/2pm ET — covers daytime + late-night drops.
-    - cron: "0 */6 * * *"
+    # Once daily at 15:00 UTC = 11am ET. Public-source promo codes and
+    # availability changes don't move fast enough to warrant 6h scans;
+    # one morning scan catches overnight changes and gives same-day
+    # actioning headroom.
+    - cron: "0 15 * * *"
   workflow_dispatch:
 
 jobs:
