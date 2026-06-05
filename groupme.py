@@ -22,21 +22,29 @@ _GM_CONFIRMED_THRESHOLD = 70  # OK to lower when date OR city confirms
 # Patterns indicating someone wants to buy a ticket.
 # "anyone selling" is buy intent (asking the group), not a sell post.
 _BUY_RE = re.compile(
-    r"\b(?:looking for|lf|iso|wtb|anyone selling|anyone got|need)\b",
+    r"\b(?:looking for|lf|iso|wtb|anyone selling|anyone got|need|"
+    r"buying|will buy|want to buy|pay for)\b",
     re.IGNORECASE,
 )
 
 # Patterns indicating someone is selling — skip these (from buy-side),
 # also used to detect sell intent in sell-side parsing.
-_SELL_RE = re.compile(r"\b(?:selling|sell|wts|for sale)\b", re.IGNORECASE)
+_SELL_RE = re.compile(
+    r"\b(?:selling|sell|wts|for sale|letting go|getting rid of|"
+    r"unloading|dumping)\b",
+    re.IGNORECASE,
+)
 
 # Broader sell-intent patterns that capture contextual selling.
 # These handle cases where the event name appears *before* the sell keyword,
 # e.g. "Bought zedds dead... Looking to sell at face value"
+# Also catches colloquial supply offers ("Have X extra", "Got X extra")
+# that don't have explicit "for sale" / "to sell" markers.
 _SELL_CONTEXT_RE = re.compile(
     r"\b(?:looking to sell|trying to sell|want to sell|need to sell|"
-    r"have .{3,40} (?:for sale|to sell)|"
-    r"got .{3,40} (?:for sale|to sell)|"
+    r"have .{3,40} (?:for sale|to sell|extra|if anyone)|"
+    r"got .{3,40} (?:for sale|to sell|extra|if anyone)|"
+    r"have \d+ extra|got \d+ extra|"
     r"bought .{3,40}(?:looking to sell|want to sell|need to sell|for sale))\b",
     re.IGNORECASE,
 )
