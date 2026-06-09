@@ -64,6 +64,7 @@ def scan_once() -> int:
         "msg",
         "forest hills stadium",
         "huntington bank pavilion",
+        "wrigley field",
     }
     seated = [e for e in cv_events if e.venue and e.venue.lower().strip() in SEATED_VENUES]
     cv_events = [e for e in cv_events if not (e.venue and e.venue.lower().strip() in SEATED_VENUES)]

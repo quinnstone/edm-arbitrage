@@ -55,6 +55,7 @@ _SEATED_SLUG_KEYWORDS = [
     "msg",               # MSG alias
     "forest-hills",      # Forest Hills Stadium, Queens
     "huntington-bank",   # Huntington Bank Pavilion, Chicago (Northerly Island)
+    "wrigley-field",     # Wrigley Field, Chicago (stadium concerts)
 ]
 
 # How often to scan in loop mode (minutes)
