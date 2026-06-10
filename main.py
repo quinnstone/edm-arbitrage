@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 import time
 from datetime import datetime
@@ -58,6 +59,8 @@ def scan_once() -> int:
     # Filter out seated venues — section-based pricing makes lowest
     # third-party price meaningless vs CrowdVolt bids for specific sections.
     # The seated_scanner module handles these via section-level matching.
+    # Word-boundary matching (not exact) so venue-name variants like
+    # "Huntington Bank Pavilion at Northerly Island" still get filtered.
     SEATED_VENUES = {
         "barclays center",
         "madison square garden",
@@ -66,8 +69,15 @@ def scan_once() -> int:
         "huntington bank pavilion",
         "wrigley field",
     }
-    seated = [e for e in cv_events if e.venue and e.venue.lower().strip() in SEATED_VENUES]
-    cv_events = [e for e in cv_events if not (e.venue and e.venue.lower().strip() in SEATED_VENUES)]
+
+    def _is_seated_venue(venue) -> bool:
+        v = (venue or "").lower().strip()
+        if not v:
+            return False
+        return any(re.search(r"\b" + re.escape(k) + r"\b", v) for k in SEATED_VENUES)
+
+    seated = [e for e in cv_events if _is_seated_venue(e.venue)]
+    cv_events = [e for e in cv_events if not _is_seated_venue(e.venue)]
     if seated:
         print(f"[Scan] Filtered out {len(seated)} seated venue events (Barclays/MSG)")
 

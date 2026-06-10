@@ -105,7 +105,23 @@ _SECTION_ALIASES = {
     "ga box": "box",
     "pavilion box": "box",
     "box seats": "box",
+    # Wrigley-style bleachers — sponsored names collapse to the area
+    "bleachers": "bleachers",
+    "bleacher": "bleachers",
+    "budweiser bleachers": "bleachers",
 }
+
+# Area prefixes that precede section numbers. US arena/stadium section
+# numbers are unique venue-wide (the tier is encoded in the number range:
+# 100s field level, 200s terrace, etc.), so the prefix is descriptive,
+# not distinguishing — "Field Box 108", "Section 108", and "108" are the
+# same physical section. Longest alternatives first so "terrace box"
+# wins over "terrace" before the number capture.
+_SECTION_NUM_RE = re.compile(
+    r"^(?:terrace reserved|upper deck box|terrace box|upper deck|"
+    r"field box|lower box|upper box|club box|loge box|pavilion|"
+    r"section|terrace|level|club|loge|sec\.?)\s*(\d+[a-z]?)\b"
+)
 
 # Position qualifiers — words that mean "this GA is a specific physical
 # area, not generic GA." When present in a section name, the wide GA
@@ -160,13 +176,15 @@ def normalize_section(raw: str) -> str:
     if lower in _SECTION_ALIASES:
         return _SECTION_ALIASES[lower]
 
-    # "Section 221" / "Sec 16" / "Sec. 7" → "221" / "16" / "7"
-    num_match = re.match(r"^(?:section|sec)\.?\s*(\d+)", lower)
+    # "Section 221" / "Sec 16" / "Pavilion 100" / "Field Box 108" → bare
+    # section number. Trailing letters are preserved ("112A" → "112a")
+    # because lettered sections are distinct from unlettered neighbors.
+    num_match = _SECTION_NUM_RE.match(lower)
     if num_match:
         return num_match.group(1)
 
-    # Already a bare number
-    if re.match(r"^\d+$", lower):
+    # Already a bare number (optionally lettered)
+    if re.match(r"^\d+[a-z]?$", lower):
         return lower
 
     # Bucket unrecognized GA-prefix variants (GA+, GA Plus, GA Premium, etc.)
