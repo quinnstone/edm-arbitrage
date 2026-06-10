@@ -137,8 +137,14 @@ def search_queries(event_name: str) -> list[str]:
         if left_clean and left_clean != right_clean:
             queries.append(left_clean)
     else:
-        # No promoter/featured split — check for multi-artist "+"/"&"
-        parts = re.split(r'\s*[+&]\s+', raw)
+        # No promoter/featured split — check for multi-artist joins.
+        # Splits on "+", "&", and standalone "b2b" / "x" / "vs" so that
+        # "Charlotte De Witte B2B Yousuke Yukimatsu" also searches each
+        # artist individually — platforms often list co-headline shows
+        # under a single artist's name. Whitespace-anchored so "x" only
+        # splits as a standalone join word ("Kozlow x Tolga"), never
+        # inside names ("Xavier", "2x").
+        parts = re.split(r'\s*[+&]\s+|\s+(?:b2b|x|vs\.?)\s+', raw)
         if len(parts) > 1:
             # Try full combined query first (some platforms handle it well),
             # then try individual artists
