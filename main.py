@@ -251,6 +251,16 @@ def scan_once() -> int:
     except Exception as e:
         print(f"[Reddit Tix] Inline scan failed (main scan continues): {e}")
 
+    # Step 3c: Marquee Skydeck face-value arb — flag CV buyer offers that
+    # exceed Tao primary face value when the primary isn't sold out (buy
+    # at face, fill the bid). Makes zero Tao requests unless a bidded
+    # Skydeck event exists. Isolated so a Tao failure can't break the scan.
+    try:
+        import skydeck_scanner
+        skydeck_scanner.scan(cv_events=upcoming_events)
+    except Exception as e:
+        print(f"[Skydeck] Inline scan failed (main scan continues): {e}")
+
     # Step 4: Track bid/ask snapshots and evaluate speculative opportunities.
     undercut.save_bid_snapshot(cv_events)
     undercut.update_listing_persistence(cv_events)
