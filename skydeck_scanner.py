@@ -239,11 +239,27 @@ def fetch_skydeck_page(s_number: int) -> Optional[SkydeckEvent]:
     )
 
 
+# Fulfillment hierarchy: which Tao tier families can fulfill a bid of a
+# given family. A Fast Pass is GA + expedited entry — a strict upgrade —
+# so it can fulfill a GA bid (the buyer gets more than they asked for).
+# The reverse is not true: a plain GA ticket cannot fulfill a Fast Pass
+# bid, since the buyer specifically paid for expedited entry.
+_FULFILLABLE_BY = {
+    "ga": ("ga", "fastpass"),
+    "fastpass": ("fastpass",),
+}
+
+
 def cheapest_available_face(ev: SkydeckEvent, family: str) -> Optional[dict]:
-    """Cheapest in-stock tier within a product family (all-in price),
-    or None if that family is sold out / absent."""
+    """Cheapest in-stock tier that can FULFILL a bid of this family
+    (all-in price), or None if nothing fulfillable is in stock.
+
+    For a GA bid this includes Fast Pass tiers (upgrade fulfillment);
+    for a Fast Pass bid only Fast Pass tiers qualify.
+    """
+    allowed = _FULFILLABLE_BY.get(family, (family,))
     in_stock = [t for t in ev.tiers
-                if t["available"] and t["family"] == family]
+                if t["available"] and t["family"] in allowed]
     if not in_stock:
         return None
     return min(in_stock, key=lambda t: t["price"])
@@ -357,12 +373,13 @@ def scan(cv_events: list, dry_run: bool = False) -> list:
     """Check bidded CV Skydeck events against Tao face value, per product
     family.
 
-    GA and GA Fast Pass are matched independently — a GA bid is only
-    compared against GA face, a Fast Pass bid against Fast Pass face.
-    Alert condition per family (operator-specified): highest CV bid in
-    the family > cheapest IN-STOCK face price in the same family. Face
-    prices are all-in (Tao fees included, as displayed on the site).
-    A sold-out family never flags, even if the other family has stock.
+    GA and GA Fast Pass are matched per the fulfillment hierarchy: a GA
+    bid can be fulfilled by GA OR Fast Pass stock (Fast Pass is a strict
+    upgrade); a Fast Pass bid only by Fast Pass stock. Alert condition
+    per family (operator-specified): highest CV bid in the family >
+    cheapest IN-STOCK fulfillable face price. Face prices are all-in
+    (Tao fees included, as displayed on the site). When nothing
+    fulfillable is in stock, no flag — per the sold-out rule.
     """
     skydeck = [
         e for e in cv_events
@@ -405,7 +422,7 @@ def scan(cv_events: list, dry_run: bool = False) -> list:
         for fam, top_bid in bids_by_family.items():
             face = cheapest_available_face(tao, fam)
             if face is None:
-                print(f"  [Skydeck] {tao.name!r} [{fam}]: family sold out — no flag")
+                print(f"  [Skydeck] {tao.name!r} [{fam}]: nothing fulfillable in stock — no flag")
                 continue
             if top_bid > face["price"]:
                 payout = top_bid * (1 - CV_SELLER_FEE)
