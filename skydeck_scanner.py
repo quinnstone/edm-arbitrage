@@ -119,8 +119,77 @@ def _mark_alerted(key: str) -> None:
 # Tao page fetch + parse
 # ---------------------------------------------------------------------------
 
+def tier_family(name: str) -> str:
+    """Classify a ticket/bid type into a product family.
+
+    GA and GA Fast Pass are DIFFERENT products (Fast Pass includes
+    expedited-entry wristband) and must never cross-match. Order matters:
+    "GA Fast Pass" contains "GA", so fast-pass is checked first.
+    """
+    n = (name or "").lower()
+    if "fast pass" in n or "fastpass" in n:
+        return "fastpass"
+    if "general admission" in n or re.search(r"\bga\b", n):
+        return "ga"
+    return "other"
+
+
+def _parse_visible_tiers(html: str) -> list:
+    """Extract live tier state from the server-rendered ticket rows.
+
+    The public rows in #ticket-types-content carry the truth:
+    - tier name in <h3 class="name ...">, with "sold-out-text" in the
+      class when sold out
+    - displayed price is ALL-IN (Tao fees included), e.g. "$130.00"
+      with a fee-notice "Incl. $5.00 in fees"
+
+    JSON-LD must NOT be used for availability or pricing — it is
+    generated at publish time and goes stale (observed live: LD said
+    InStock/base-price while the page showed Sold Out/all-in).
+    """
+    # Slice to the public section only (skip the access-code unlock area)
+    start = html.find('id="ticket-types-content"')
+    if start == -1:
+        return []
+    section = html[start:]
+
+    tiers = []
+    blocks = re.split(r'class="ticket-type-item', section)[1:]
+    for block in blocks:
+        name_m = re.search(
+            r'<h3 class="name([^"]*)">\s*(.*?)\s*</h3>', block, re.DOTALL)
+        if not name_m:
+            continue
+        name_classes = name_m.group(1)
+        name = re.sub(r"<[^>]+>", "", name_m.group(2)).strip()
+        if not name:
+            continue
+
+        price_m = re.search(r"\$\s*([\d,]+(?:\.\d{2})?)", block)
+        if not price_m:
+            continue
+        price_allin = float(price_m.group(1).replace(",", ""))
+        if price_allin <= 0:
+            continue
+
+        sold_out = "sold-out-text" in name_classes or \
+                   'class="ticket-sold-out-text"' in block
+
+        tiers.append({
+            "name": name,
+            "price": price_allin,          # fee-inclusive, what you'd pay
+            "available": not sold_out,
+            "family": tier_family(name),
+        })
+    return tiers
+
+
 def fetch_skydeck_page(s_number: int) -> Optional[SkydeckEvent]:
     """Fetch and parse one Tao Skydeck event page.
+
+    Name + date come from title/JSON-LD; tier availability + all-in
+    pricing come from the live server-rendered rows (see
+    _parse_visible_tiers for why LD offers are not trusted).
 
     Returns None when the slot is "Event Not Found" or unparseable.
     """
@@ -139,71 +208,42 @@ def fetch_skydeck_page(s_number: int) -> Optional[SkydeckEvent]:
     if "event not found" in title.lower():
         return None
     # "SOFI TUKKER | Tao Group Hospitality" → "SOFI TUKKER"
-    title_name = title.split("|")[0].strip()
+    name = title.split("|")[0].strip()
 
-    ld_blocks = re.findall(
-        r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL)
-    name = title_name
     event_date = None
-    tiers = []
-    for block in ld_blocks:
+    for block in re.findall(
+            r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL):
         try:
             data = json.loads(block)
         except (json.JSONDecodeError, TypeError):
             continue
-        if not isinstance(data, dict) or data.get("@type") not in ("MusicEvent", "Event"):
-            continue
-
-        ld_name = (data.get("name") or "").strip()
-        if ld_name and ld_name.lower() not in _PLACEHOLDER_NAMES:
-            # LD name is real; title is also real — prefer the title since
-            # it stays accurate even when LD lags announcements, unless the
-            # title itself is empty.
-            name = title_name or ld_name
-
-        start = data.get("startDate")
-        if start:
-            try:
-                event_date = dateparser.parse(start)
-            except (ValueError, TypeError):
-                pass
-
-        offers = data.get("offers") or []
-        if isinstance(offers, dict):
-            offers = [offers]
-        for offer in offers:
-            if not isinstance(offer, dict):
-                continue
-            # Only primary (face value) inventory — skip any resale category
-            category = (offer.get("category") or "PRIMARY").upper()
-            if category != "PRIMARY":
-                continue
-            try:
-                price = float(offer.get("price") or 0)
-            except (TypeError, ValueError):
-                continue
-            if price <= 0:
-                continue  # $0 placeholders / announce stubs
-            avail = (offer.get("availability") or "").split("/")[-1]
-            tiers.append({
-                "name": offer.get("name") or "GA",
-                "price": price,
-                "available": avail == "InStock",
-            })
-        break  # first MusicEvent block wins
+        if isinstance(data, dict) and data.get("@type") in ("MusicEvent", "Event"):
+            if not name:
+                ld_name = (data.get("name") or "").strip()
+                if ld_name and ld_name.lower() not in _PLACEHOLDER_NAMES:
+                    name = ld_name
+            start = data.get("startDate")
+            if start:
+                try:
+                    event_date = dateparser.parse(start)
+                except (ValueError, TypeError):
+                    pass
+            break
 
     if not name:
         return None
 
     return SkydeckEvent(
         s_number=s_number, url=url, name=name,
-        event_date=event_date, tiers=tiers,
+        event_date=event_date, tiers=_parse_visible_tiers(html),
     )
 
 
-def cheapest_available_face(ev: SkydeckEvent) -> Optional[dict]:
-    """Cheapest purchasable PRIMARY tier, or None if effectively sold out."""
-    in_stock = [t for t in ev.tiers if t["available"]]
+def cheapest_available_face(ev: SkydeckEvent, family: str) -> Optional[dict]:
+    """Cheapest in-stock tier within a product family (all-in price),
+    or None if that family is sold out / absent."""
+    in_stock = [t for t in ev.tiers
+                if t["available"] and t["family"] == family]
     if not in_stock:
         return None
     return min(in_stock, key=lambda t: t["price"])
@@ -314,15 +354,19 @@ def _match_tao_slot(cv_event, cache: dict) -> Optional[int]:
 
 
 def scan(cv_events: list, dry_run: bool = False) -> list:
-    """Check bidded CV Skydeck events against Tao face value.
+    """Check bidded CV Skydeck events against Tao face value, per product
+    family.
 
-    Alert condition (operator-specified): cv.max_bid > cheapest available
-    PRIMARY face price, AND that tier is in stock. Estimated profit shown
-    net of CrowdVolt's ~10% seller fee; Tao checkout fees not included.
+    GA and GA Fast Pass are matched independently — a GA bid is only
+    compared against GA face, a Fast Pass bid against Fast Pass face.
+    Alert condition per family (operator-specified): highest CV bid in
+    the family > cheapest IN-STOCK face price in the same family. Face
+    prices are all-in (Tao fees included, as displayed on the site).
+    A sold-out family never flags, even if the other family has stock.
     """
     skydeck = [
         e for e in cv_events
-        if e.venue and "skydeck" in e.venue.lower() and e.max_bid is not None
+        if e.venue and "skydeck" in e.venue.lower() and e.bids
     ]
     if not skydeck:
         return []  # zero Tao traffic when no bidded Skydeck events
@@ -339,35 +383,49 @@ def scan(cv_events: list, dry_run: bool = False) -> list:
             print(f"  [Skydeck] {cv.name!r}: no Tao page matched by date")
             continue
 
-        # Fetch fresh — offers/sold-out state changes faster than the cache
+        # Fetch fresh — sold-out state changes faster than the cache
         tao = fetch_skydeck_page(s)
         time.sleep(0.5)
         if tao is None:
             continue
 
-        face = cheapest_available_face(tao)
-        if face is None:
+        if not any(t["available"] for t in tao.tiers):
             print(f"  [Skydeck] {tao.name!r} (s{s}): SOLD OUT — no flag per rule")
             continue
 
-        if cv.max_bid > face["price"]:
-            payout = cv.max_bid * (1 - CV_SELLER_FEE)
-            arbs.append(SkydeckArb(
-                cv_event=cv, tao=tao,
-                face_price=face["price"], face_tier=face["name"],
-                cv_bid=cv.max_bid,
-                est_profit=round(payout - face["price"], 2),
-            ))
-            print(f"  [Skydeck] ARB: {tao.name!r} bid ${cv.max_bid:.0f} > "
-                  f"face ${face['price']:.0f} ({face['name']})")
-        else:
-            print(f"  [Skydeck] {tao.name!r}: bid ${cv.max_bid:.0f} <= "
-                  f"face ${face['price']:.0f} — no flag")
+        # Highest CV bid per product family
+        bids_by_family: dict = {}
+        for bid in cv.bids:
+            fam = tier_family(bid.ticket_type)
+            if fam == "other":
+                continue  # tables/VIP etc. — out of scope
+            if fam not in bids_by_family or bid.all_in_price > bids_by_family[fam]:
+                bids_by_family[fam] = bid.all_in_price
 
-    # Dedup + send
+        for fam, top_bid in bids_by_family.items():
+            face = cheapest_available_face(tao, fam)
+            if face is None:
+                print(f"  [Skydeck] {tao.name!r} [{fam}]: family sold out — no flag")
+                continue
+            if top_bid > face["price"]:
+                payout = top_bid * (1 - CV_SELLER_FEE)
+                arbs.append(SkydeckArb(
+                    cv_event=cv, tao=tao,
+                    face_price=face["price"], face_tier=face["name"],
+                    cv_bid=top_bid,
+                    est_profit=round(payout - face["price"], 2),
+                ))
+                print(f"  [Skydeck] ARB [{fam}]: {tao.name!r} bid ${top_bid:.0f} > "
+                      f"face ${face['price']:.0f} ({face['name']})")
+            else:
+                print(f"  [Skydeck] {tao.name!r} [{fam}]: bid ${top_bid:.0f} <= "
+                      f"face ${face['price']:.0f} — no flag")
+
+    # Dedup + send. Key includes tier so GA and Fast Pass alert separately,
+    # and a changed bid or face re-alerts.
     fresh = []
     for a in arbs:
-        key = f"{a.cv_event.slug}|{a.cv_bid:.0f}|{a.face_price:.0f}"
+        key = f"{a.cv_event.slug}|{a.face_tier}|{a.cv_bid:.0f}|{a.face_price:.0f}"
         if not _was_recently_alerted(key):
             fresh.append((key, a))
 
@@ -405,7 +463,7 @@ def _send_alert(a: SkydeckArb) -> bool:
                  "value": f"**${a.face_price:.0f}** ({a.face_tier})", "inline": True},
                 {"name": "Est. profit (after ~10% CV fee)",
                  "value": f"**${a.est_profit:+.0f}**{profit_note}\n"
-                          f"_Tao checkout fees not included_",
+                          f"_Face is all-in (Tao fees included)_",
                  "inline": False},
                 {"name": "Links",
                  "value": f"[Buy at face (Tao)]({a.tao.url}) | [Fill bid (CrowdVolt)]({cv.url})",
