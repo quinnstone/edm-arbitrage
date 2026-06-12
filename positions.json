@@ -6,7 +6,7 @@
     "listed_price": 180,
     "status": "open"
   },
-  "_notes": "Tracked in git on purpose (durable, unlike data/ cache). One ticket per position. status: open | sold | closed — only open is monitored. platform must be one of: TickPick, Gametime, StubHub, VividSeats, SeatGeek.",
+  "_notes": "Tracked in git on purpose (durable, unlike data/ cache). One ticket per position. listed_price is the NET payout — fees already accounted, no further deduction applied. status: open | sold | closed — only open is monitored. platform is informational/validated against: TickPick, Gametime, StubHub, VividSeats, SeatGeek.",
   "positions": [
     {
       "event": "Tripolism",

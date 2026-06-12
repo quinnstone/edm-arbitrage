@@ -10,8 +10,9 @@ purpose. The data/ Actions cache can be evicted without warning, which
 is fine for dedup state but unacceptable for records of real money at
 risk.
 
-Severity model (margin = payout − CV cheapest ask; payout = listed
-price net of the 3P seller fee):
+Severity model (margin = payout − CV cheapest ask). IMPORTANT: the
+operator quotes listed_price WITH fees already accounted — it IS the
+expected payout. No further fee deduction is applied here.
 
     healthy     margin >= $5     silent
     thin        $0 <= margin < 5 alert once on entry
@@ -144,9 +145,13 @@ def _resolve(position: dict, cv_events: list):
 
 
 def assess(position: dict, cv_event) -> dict:
-    """Compute payout / margin / severity for a resolved position."""
-    fee = _seller_fee(position["platform"])
-    payout = float(position["listed_price"]) * (1 - fee)
+    """Compute payout / margin / severity for a resolved position.
+
+    listed_price is the operator's NET number — fees already accounted
+    per their quoting convention — so it is used as the payout directly.
+    The platform field is kept for records/validation only.
+    """
+    payout = float(position["listed_price"])
 
     if cv_event is None:
         return {"severity": "unresolved", "payout": round(payout, 2),
@@ -281,7 +286,7 @@ def _send_alert(position: dict, cv_event, result: dict) -> bool:
         {"name": "Listed",
          "value": f"${float(position['listed_price']):.0f} on {position['platform']}",
          "inline": True},
-        {"name": "Payout after fee",
+        {"name": "Payout (fees already in)",
          "value": f"${result['payout']:.2f}", "inline": True},
     ]
     if result["min_ask"] is not None:

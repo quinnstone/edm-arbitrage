@@ -117,6 +117,87 @@ def _extract_book_json(html: str) -> Optional[dict]:
         return None
 
 
+def _extract_summary_book(html: str) -> Optional[dict]:
+    """Fallback for pages that ship "initialBook":null (the full book
+    hydrates client-side and never appears in the HTML). The server still
+    embeds a per-ticket-type top-of-book summary in tt_data, plus
+    event-level max_bid / max_bid_all_in. Depth is lost — only the best
+    bid/ask per type is visible.
+    """
+    unescaped = html.replace('\\"', '"')
+    idx = unescaped.find('"tt_data"')
+    if idx < 0:
+        return None
+    try:
+        start = unescaped.index("{", idx + len('"tt_data"'))
+    except ValueError:
+        return None
+    depth = 0
+    pos = start
+    while pos < len(unescaped):
+        ch = unescaped[pos]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        pos += 1
+    try:
+        tt = json.loads(unescaped[start : pos + 1])
+    except json.JSONDecodeError:
+        return None
+
+    summary = {"types": tt.get("types", [])}
+    for field_name in ("max_bid", "max_bid_all_in"):
+        m = re.search(rf'"{field_name}":([\d.]+)', unescaped)
+        if m:
+            summary[field_name] = float(m.group(1))
+    return summary
+
+
+def _listings_from_summary(summary: dict) -> tuple[list, list]:
+    """Synthesize one-deep bid/ask listings per ticket type.
+
+    Asks carry an exact all-in price (all_in_lowest_ask_price). Bids only
+    expose the raw price per type, so net-to-seller all-in is derived from
+    the event-level max_bid -> max_bid_all_in ratio (exact for the type
+    holding the top bid, proportional for the rest).
+    """
+    bids, asks = [], []
+    max_bid = summary.get("max_bid") or 0
+    max_bid_all_in = summary.get("max_bid_all_in") or 0
+    factor = (max_bid_all_in / max_bid) if max_bid and max_bid_all_in else 1.0
+
+    for t in summary.get("types", []):
+        if not isinstance(t, dict) or t.get("visible") is False:
+            continue
+        name = t.get("name", "GA")
+        ask_price = t.get("lowest_ask_price")
+        if ask_price:
+            asks.append(Listing(
+                user="(summary)",
+                price=float(ask_price),
+                all_in_price=float(t.get("all_in_lowest_ask_price") or ask_price),
+                qty=int(t.get("lowest_ask_qty") or 1),
+                ticket_type=name,
+            ))
+        bid_price = t.get("highest_bid_price")
+        if bid_price:
+            if float(bid_price) == max_bid and max_bid_all_in:
+                bid_all_in = max_bid_all_in
+            else:
+                bid_all_in = round(float(bid_price) * factor, 2)
+            bids.append(Listing(
+                user="(summary)",
+                price=float(bid_price),
+                all_in_price=bid_all_in,
+                qty=int(t.get("highest_bid_qty") or 1),
+                ticket_type=name,
+            ))
+    return bids, asks
+
+
 def _extract_event_metadata(html: str) -> dict:
     """Extract event-level metadata from the page HTML.
 
@@ -232,6 +313,13 @@ def fetch_event(slug: str, retries: int = 2) -> Optional[CrowdVoltEvent]:
     if book:
         event.bids = _parse_listings(book.get("buy", []))
         event.asks = _parse_listings(book.get("sell", []))
+    if not event.bids and not event.asks:
+        # Many pages now ship "initialBook":null and hydrate the book
+        # client-side — fall back to the server-rendered tt_data summary
+        # (top-of-book per ticket type) so these events stay visible.
+        summary = _extract_summary_book(html)
+        if summary:
+            event.bids, event.asks = _listings_from_summary(summary)
 
     # Compute summary prices excluding premium tiers so we don't
     # compare VIP bids against GA asks from external sources.
