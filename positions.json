@@ -7,5 +7,20 @@
     "status": "open"
   },
   "_notes": "Tracked in git on purpose (durable, unlike data/ cache). One ticket per position. status: open | sold | closed — only open is monitored. platform must be one of: TickPick, Gametime, StubHub, VividSeats, SeatGeek.",
-  "positions": []
+  "positions": [
+    {
+      "event": "Tripolism",
+      "event_date": "2026-06-13",
+      "platform": "StubHub",
+      "listed_price": 106,
+      "status": "open"
+    },
+    {
+      "event": "Four Tet",
+      "event_date": "2026-09-17",
+      "platform": "TickPick",
+      "listed_price": 89,
+      "status": "open"
+    }
+  ]
 }

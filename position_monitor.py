@@ -55,8 +55,10 @@ _SEVERITY_STYLE = {
                    "label": "UNDERWATER — a sale now loses money"},
     "no_supply":  {"emoji": "🔻", "color": 0x992D22,
                    "label": "NO CV SUPPLY — cannot fulfill at any price"},
-    "unresolved": {"emoji": "🔍", "color": 0x992D22,
-                   "label": "Event not found on CrowdVolt"},
+    "unresolved": {"emoji": "🔻", "color": 0x992D22,
+                   "label": ("No visible CV market — the event has no active "
+                             "bids/asks (or was delisted). There is currently "
+                             "nothing to source from if your listing sells.")},
 }
 
 
