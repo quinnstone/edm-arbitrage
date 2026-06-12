@@ -1,0 +1,11 @@
+{
+  "_schema_example": {
+    "event": "Charlotte de Witte b2b Yousuke Yukimatsu",
+    "event_date": "2026-08-08",
+    "platform": "TickPick",
+    "listed_price": 180,
+    "status": "open"
+  },
+  "_notes": "Tracked in git on purpose (durable, unlike data/ cache). One ticket per position. status: open | sold | closed — only open is monitored. platform must be one of: TickPick, Gametime, StubHub, VividSeats, SeatGeek.",
+  "positions": []
+}

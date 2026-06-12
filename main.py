@@ -261,6 +261,16 @@ def scan_once() -> int:
     except Exception as e:
         print(f"[Skydeck] Inline scan failed (main scan continues): {e}")
 
+    # Step 3d: Open-position risk monitor — watches naked spec listings
+    # recorded in positions.json and alerts when CV's cheapest ask erodes
+    # the after-fee payout (thin < $5 margin / underwater / no supply).
+    # Problem-alerts only; isolated so a failure can't break the scan.
+    try:
+        import position_monitor
+        position_monitor.scan(cv_events=upcoming_events)
+    except Exception as e:
+        print(f"[Positions] Inline monitor failed (main scan continues): {e}")
+
     # Step 4: Track bid/ask snapshots and evaluate speculative opportunities.
     undercut.save_bid_snapshot(cv_events)
     undercut.update_listing_persistence(cv_events)
