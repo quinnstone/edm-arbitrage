@@ -23,6 +23,19 @@ HEADERS = {
     ),
 }
 
+# CrowdVolt's client-side book API — the same endpoint the page calls
+# after hydration. Required by the gate: a magic header value sourced
+# from the bundled JS. If CrowdVolt rotates this constant, calls will
+# 503 and we'll fall back to the in-page tt_data summary (top-of-book
+# only, no depth).
+BOOK_API_URL = "https://what.crowdvolt.com/api/book/get"
+BOOK_API_HEADERS = {
+    **HEADERS,
+    "Referer": "https://www.crowdvolt.com/",
+    "Content-Type": "application/json",
+    "x-pokedex": "0376",
+}
+
 
 @dataclass
 class Listing:
@@ -47,6 +60,7 @@ class CrowdVoltEvent:
     min_ask: Optional[float] = None
     max_bid: Optional[float] = None
     url: str = ""
+    book_source: str = ""  # embedded | api | summary | "" (no book)
 
 
 def fetch_sitemap() -> list[str]:
@@ -115,6 +129,35 @@ def _extract_book_json(html: str) -> Optional[dict]:
         return json.loads(book_str)
     except json.JSONDecodeError:
         return None
+
+
+def _fetch_book_api(event_uqid: str, retries: int = 2) -> Optional[dict]:
+    """Fetch the full order book directly from CrowdVolt's client API.
+
+    Same JSON shape as the legacy page-embedded initialBook
+    ({"buy": [...], "sell": [...]}). Returns None on any failure so
+    the caller can fall through to the summary parser.
+    """
+    for attempt in range(1 + retries):
+        try:
+            resp = requests.get(
+                BOOK_API_URL,
+                params={"event_uqid": event_uqid},
+                headers=BOOK_API_HEADERS,
+                timeout=config.REQUEST_TIMEOUT,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+            return None
+        except (requests.RequestException, ValueError):
+            if attempt < retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+            return None
+    return None
 
 
 def _extract_summary_book(html: str) -> Optional[dict]:
@@ -308,18 +351,25 @@ def fetch_event(slug: str, retries: int = 2) -> Optional[CrowdVoltEvent]:
         except (ValueError, TypeError):
             pass
 
-    # Extract order book
+    # Extract order book — three tiers, in order of preference:
+    #   1. Page-embedded initialBook (free; ~30% of pages still ship it)
+    #   2. Client-side book API (full depth; defeats the null-book issue)
+    #   3. tt_data top-of-book summary (last-resort if the API is broken)
     book = _extract_book_json(html)
+    if book:
+        event.book_source = "embedded"
+    else:
+        book = _fetch_book_api(slug)
+        if book:
+            event.book_source = "api"
     if book:
         event.bids = _parse_listings(book.get("buy", []))
         event.asks = _parse_listings(book.get("sell", []))
     if not event.bids and not event.asks:
-        # Many pages now ship "initialBook":null and hydrate the book
-        # client-side — fall back to the server-rendered tt_data summary
-        # (top-of-book per ticket type) so these events stay visible.
         summary = _extract_summary_book(html)
         if summary:
             event.bids, event.asks = _listings_from_summary(summary)
+            event.book_source = "summary"
 
     # Compute summary prices excluding premium tiers so we don't
     # compare VIP bids against GA asks from external sources.
@@ -390,5 +440,14 @@ def fetch_all_events() -> list[CrowdVoltEvent]:
     if failed_slugs:
         print(f"[CrowdVolt] {len(failed_slugs)} pages failed to fetch or had no data")
 
-    print(f"[CrowdVolt] {len(events)} events with active listings")
+    src_counts = {"embedded": 0, "api": 0, "summary": 0}
+    for ev in events:
+        if ev.book_source in src_counts:
+            src_counts[ev.book_source] += 1
+    print(f"[CrowdVolt] {len(events)} events with active listings "
+          f"(book source — embedded: {src_counts['embedded']}, "
+          f"api: {src_counts['api']}, summary: {src_counts['summary']})")
+    if src_counts["summary"] and not src_counts["api"]:
+        print("[CrowdVolt] WARNING: API never succeeded — x-pokedex may have "
+              "rotated. Spec digest depth is degraded.")
     return events
