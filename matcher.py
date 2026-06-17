@@ -715,6 +715,14 @@ def match_gametime(
             continue
         if not _venues_match(cv_event.venue, gt.venue):
             continue
+        if gt.min_price is None and not gt.event_id:
+            continue
+
+        # All filters passed — upgrade JSON-LD top-of-book to the
+        # mobile API's exact per-listing depth + face values.
+        import gametime as _gametime
+        _gametime.enrich_with_listings(gt)
+
         if gt.min_price is None:
             continue
 
