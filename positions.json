@@ -21,6 +21,20 @@
       "platform": "TickPick",
       "listed_price": 89,
       "status": "open"
+    },
+    {
+      "event": "Bob Moses",
+      "event_date": "2026-06-19",
+      "platform": "StubHub",
+      "listed_price": 117,
+      "status": "open"
+    },
+    {
+      "event": "Elderbrook",
+      "event_date": "2026-06-20",
+      "platform": "TickPick",
+      "listed_price": 84,
+      "status": "open"
     }
   ]
 }
