@@ -51,6 +51,7 @@ SENT_ALERTS_FILE = os.path.join(_DATA_DIR, "undercut_sent.json")
 BID_HISTORY_FILE = os.path.join(_DATA_DIR, "bid_snapshots.json")
 OPPORTUNITY_LOG = os.path.join(_DATA_DIR, "opportunity_log.jsonl")
 LISTING_PERSISTENCE_FILE = os.path.join(_DATA_DIR, "listing_persistence.json")
+SPEC_DIGEST_STATE_FILE = os.path.join(_DATA_DIR, "spec_digest_slot.json")
 
 # Trend snapshots and per-listing persistence both age out at this horizon.
 # 7 days lets us see real direction on 30-day-out events without bloating
@@ -552,24 +553,63 @@ def _format_digest_hour(hour: int) -> str:
     return f"{h12}{suffix}"
 
 
+def _due_digest_slot(now_nyc: datetime) -> Optional[tuple]:
+    """Most recent (date_iso, hour) digest slot whose target time has
+    already arrived in NYC time. Returns None only if no digest hours
+    are configured.
+
+    Used to make the digest gate state-based instead of hour-equality
+    based — GitHub Actions cron drops ~90% of */15 runs during peak
+    hours, so the slot's exact hour often has no scan at all.
+    """
+    if not config.SPEC_DIGEST_HOURS:
+        return None
+    today = now_nyc.date()
+    yesterday = today - timedelta(days=1)
+    today_passed = [h for h in config.SPEC_DIGEST_HOURS if now_nyc.hour >= h]
+    if today_passed:
+        return (today.isoformat(), max(today_passed))
+    return (yesterday.isoformat(), max(config.SPEC_DIGEST_HOURS))
+
+
+def _slot_already_sent(slot: tuple) -> bool:
+    try:
+        with open(SPEC_DIGEST_STATE_FILE) as f:
+            state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    last = state.get("last_sent_slot")
+    if not last or len(last) != 2:
+        return False
+    return tuple(last) >= slot
+
+
+def _record_slot_sent(slot: tuple) -> None:
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    with open(SPEC_DIGEST_STATE_FILE, "w") as f:
+        json.dump({"last_sent_slot": list(slot)}, f)
+
+
 def send_alerts(opportunities: list[SpeculativeOpportunity]) -> int:
-    """Send a CV→3P spec digest to Discord at each scheduled hour.
+    """Send a CV→3P spec digest to Discord at each scheduled slot.
 
-    Fires only when the current NYC hour is in SPEC_DIGEST_HOURS (1pm and
-    5pm by default). All fresh opportunities are batched into a single
-    message, sorted by est_profit and capped at 10 (Discord's per-message
-    embed limit). The 18h per-event cooldown prevents an event alerted at
-    1pm from re-appearing at 5pm same day, while still letting it refresh
-    in tomorrow's 1pm digest if conditions still hold.
+    Slot-based gate (state file in data/): for each (date, hour) slot
+    whose target time has passed in NYC, send exactly once. The next
+    scan that runs after the slot's hour services it, so cron drops by
+    GitHub Actions can no longer cause an entire window to go silent —
+    the digest just lands a bit later than the nominal time. The 18h
+    per-event cooldown still prevents the same event re-appearing at
+    consecutive slots.
 
-    Returns the number of opportunities included in the digest, or 0 when
-    we're outside any digest window or have nothing fresh to send.
+    Returns the number of opportunities included in the digest, or 0
+    when nothing is due or there's nothing fresh to send.
     """
     if not config.DISCORD_WEBHOOK_URL:
         return 0
 
     now_nyc = datetime.now(DIGEST_TIMEZONE)
-    if now_nyc.hour not in config.SPEC_DIGEST_HOURS:
+    slot = _due_digest_slot(now_nyc)
+    if slot is None or _slot_already_sent(slot):
         return 0
 
     fresh = [o for o in opportunities
@@ -580,8 +620,9 @@ def send_alerts(opportunities: list[SpeculativeOpportunity]) -> int:
     fresh.sort(key=lambda o: o.est_profit, reverse=True)
     top = fresh[:10]
 
-    date_str = now_nyc.strftime("%b %d")
-    hour_label = _format_digest_hour(now_nyc.hour)
+    slot_date_iso, slot_hour = slot
+    date_str = datetime.fromisoformat(slot_date_iso).strftime("%b %d")
+    hour_label = _format_digest_hour(slot_hour)
     plural = "ies" if len(fresh) != 1 else "y"
     summary = (f"🔔 **CV→3P Spec Digest** — {date_str} {hour_label} — "
                f"{len(fresh)} opportunit{plural}")
@@ -600,6 +641,7 @@ def send_alerts(opportunities: list[SpeculativeOpportunity]) -> int:
             timeout=config.REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
+        _record_slot_sent(slot)
         for opp in top:
             _mark_alerted(opp.crowdvolt_event.slug)
         if len(fresh) > 10:
