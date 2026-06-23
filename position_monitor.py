@@ -16,9 +16,15 @@ expected payout. No further fee deduction is applied here.
 
     healthy     margin >= $5     silent
     thin        $0 <= margin < 5 alert once on entry
-    underwater  margin < $0      alert on entry + daily reminder
+    underwater  margin < $0      alert on entry + hourly reminder
     no_supply   zero CV asks     alert on entry + daily (can't fulfill)
     unresolved  event not found  alert after 2 consecutive scan misses
+
+Underwater reminders are hourly (operator-set) because the loss can
+deepen silently — Bob Moses walked from -$7 to -$59 over 32h in June
+with the old 23h cadence firing only twice, both during sleep hours.
+no_supply / unresolved stay daily — those signal a system condition
+(scrape gap, delisting) rather than active loss escalation.
 
 Escalation always alerts immediately; recovery is silent (operator
 wants problem-alerts only). Checked every 15 min via main.scan_once.
@@ -37,9 +43,10 @@ import config
 import matcher
 from undercut import SELLER_FEES
 
-THIN_MARGIN = 5.0           # dollars — operator-specified
-REMINDER_HOURS = 23         # daily reminder cadence for underwater/no-supply
-UNRESOLVED_MISSES = 2       # consecutive scans before "not found" alerts
+THIN_MARGIN = 5.0                # dollars — operator-specified
+REMINDER_HOURS = 23              # default reminder cadence (no_supply, unresolved)
+UNDERWATER_REMINDER_HOURS = 1    # operator-set: keep underwater loud
+UNRESOLVED_MISSES = 2            # consecutive scans before "not found" alerts
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 POSITIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "positions.json")
@@ -196,12 +203,13 @@ def _should_alert(pid: str, severity: str, state: dict) -> bool:
     # Same severity as last scan:
     if severity == "thin":
         return False  # one alert on entry only
-    # underwater / no_supply / unresolved → daily reminder
+    # underwater → hourly reminder; no_supply / unresolved → daily.
     last_alert = entry.get("last_alert")
     if not last_alert:
         return True
+    cadence = UNDERWATER_REMINDER_HOURS if severity == "underwater" else REMINDER_HOURS
     try:
-        return datetime.now() - datetime.fromisoformat(last_alert) >= timedelta(hours=REMINDER_HOURS)
+        return datetime.now() - datetime.fromisoformat(last_alert) >= timedelta(hours=cadence)
     except (ValueError, TypeError):
         return True
 
