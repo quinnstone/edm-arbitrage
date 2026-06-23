@@ -2,12 +2,19 @@ name: Ticket Arbitrage Scan
 
 on:
   schedule:
-    # Two staggered crons so each 15-min slot has two independent
-    # trigger attempts ~7-8 min apart. GitHub Actions drops cron
-    # triggers under load — having two crons effectively doubles the
-    # odds any given window catches a scan.
-    - cron: "0,15,30,45 * * * *"
-    - cron: "7,22,37,52 * * * *"
+    # Two staggered */5 crons so each 5-min slot has two independent
+    # trigger attempts ~2-3 min apart. With concurrency cancel-in-
+    # progress=false, the second of any overlapping pair gets queued
+    # (or canceled if a queued one already exists), so effective
+    # cadence is bounded by scan duration (~5-6 min), not trigger
+    # frequency — more triggers just churn through cancellations to
+    # produce a successful scan whenever the runner pool can take one.
+    # Trade-off: GHA may throttle */5 more than */15 under load. If
+    # 48h of production data shows the throttle is worse than expected,
+    # revert these to "0,15,30,45" + "7,22,37,52" and add an external
+    # workflow_dispatch scheduler instead.
+    - cron: "0,5,10,15,20,25,30,35,40,45,50,55 * * * *"
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
   workflow_dispatch: # Allow manual triggers
 
 # Serialize runs of this workflow. Scans take ~11 min and crons fire
