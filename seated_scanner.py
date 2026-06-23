@@ -37,6 +37,8 @@ from matcher import _name_similarity, _localize_cv_date, _dates_match, search_qu
 _DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 _SEATED_SPEC_SENT_FILE = os.path.join(_DATA_DIR, "seated_spec_sent.json")
 _SEATED_SPEC_COOLDOWN_HOURS = 18  # matches undercut's dual-digest cadence
+_SEATED_FORWARD_SENT_FILE = os.path.join(_DATA_DIR, "seated_forward_sent.json")
+_SEATED_FORWARD_COOLDOWN_HOURS = 18  # mirror the spec cadence
 _SEATED_SPEC_DIGEST_TZ = ZoneInfo("America/New_York")
 _TICKPICK_SELLER_FEE = 0.10  # TickPick takes ~10% from sellers
 
@@ -529,6 +531,42 @@ def _spec_mark_alerted(slug: str, section: str) -> None:
         json.dump(sent, f)
 
 
+def _forward_dedup_key(opp: "SeatedOpportunity") -> str:
+    """Key includes bid + tp_price (rounded) so re-pricing re-alerts but
+    stable opps stay quiet within the cooldown window."""
+    return (f"{opp.crowdvolt_event.slug}|{opp.section}"
+            f"|{opp.cv_bid_price:.0f}|{opp.tp_price:.0f}")
+
+
+def _forward_was_recently_alerted(key: str) -> bool:
+    try:
+        with open(_SEATED_FORWARD_SENT_FILE) as f:
+            sent = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    last = sent.get(key)
+    if not last:
+        return False
+    try:
+        return datetime.now() - datetime.fromisoformat(last) < timedelta(hours=_SEATED_FORWARD_COOLDOWN_HOURS)
+    except (ValueError, TypeError):
+        return False
+
+
+def _forward_mark_alerted(key: str) -> None:
+    try:
+        with open(_SEATED_FORWARD_SENT_FILE) as f:
+            sent = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        sent = {}
+    sent[key] = datetime.now().isoformat()
+    cutoff = (datetime.now() - timedelta(hours=_SEATED_FORWARD_COOLDOWN_HOURS * 2)).isoformat()
+    sent = {k: v for k, v in sent.items() if v > cutoff}
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    with open(_SEATED_FORWARD_SENT_FILE, "w") as f:
+        json.dump(sent, f)
+
+
 def _format_spec_embed(opp: SeatedSpecOpportunity) -> dict:
     cv = opp.crowdvolt_event
     cv_local = _localize_cv_date(cv) if cv.event_date else None
@@ -816,9 +854,26 @@ def scan_once(dry_run: bool = False) -> int:
             slug = opp.crowdvolt_event.slug
             by_event.setdefault(slug, []).append(opp)
 
+        sent_count = 0
+        suppressed_count = 0
         for slug, opps in by_event.items():
-            send_alert(opps)
+            # Filter to opps that haven't been alerted at this (bid, tp_price)
+            # combination within the cooldown. A meaningful re-pricing (bid
+            # moves $1+, TP listing shifts) produces a new key and re-alerts.
+            fresh = [o for o in opps
+                     if not _forward_was_recently_alerted(_forward_dedup_key(o))]
+            suppressed_count += len(opps) - len(fresh)
+            if not fresh:
+                continue
+            if send_alert(fresh):
+                for o in fresh:
+                    _forward_mark_alerted(_forward_dedup_key(o))
+                sent_count += len(fresh)
             time.sleep(1)
+
+        if suppressed_count:
+            print(f"  [Seated] {suppressed_count} forward-arb opp(s) suppressed "
+                  f"by dedup; {sent_count} fresh alerts sent")
 
         send_summary(len(bid_events), matched_count,
                      len(all_opportunities), errors)
