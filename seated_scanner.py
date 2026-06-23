@@ -740,8 +740,14 @@ def scan_once(dry_run: bool = False) -> int:
             send_summary(0, 0, 0, 0)
         return 0
 
+    # Stadium tickets: forward-arb only (buy TP cheap → fill CV bid). The
+    # spec direction (sell on TP, source from CV ask) was structurally a
+    # bad match for stadium TM tickets — two TM transfers under time
+    # pressure with high race-out risk — and generated noisy false-positive
+    # alerts on multi-night MSG runs like Rufus du Sol. The spec
+    # find/digest/embed functions stay defined for now in case the policy
+    # changes; they're just not invoked.
     all_opportunities = []
-    all_spec_opportunities = []
     matched_count = 0
     errors = 0
 
@@ -801,21 +807,6 @@ def scan_once(dry_run: bool = False) -> int:
             else:
                 print("  No forward-arb section opportunities")
 
-        # Spec listing: sell on TP at section market → source from CV ask.
-        # Only when event has asks (need CV sellers to source from).
-        if cv_event.asks:
-            spec_opps = find_section_spec_arbitrage(
-                cv_event, tp_listings, tp_event.url)
-            if spec_opps:
-                print(f"  [Spec listing: {len(spec_opps)} opportunities]")
-                for opp in spec_opps:
-                    print(f"    [{opp.cv_section_raw}] CV ${opp.cv_ask_price:.0f} "
-                          f"→ TP ${opp.tp_price:.0f} = +${opp.est_profit:.0f} "
-                          f"({opp.ask_count_at_section} CV asks cushion)")
-                all_spec_opportunities.extend(spec_opps)
-            else:
-                print("  No section-level spec opportunities")
-
         time.sleep(1)  # pace requests
 
     # Send forward-arb alerts (per event, per scan — short-lived opps)
@@ -829,16 +820,11 @@ def scan_once(dry_run: bool = False) -> int:
             send_alert(opps)
             time.sleep(1)
 
-        # Send spec digest (only fires at 1pm/5pm NYC hours, deduped)
-        if all_spec_opportunities:
-            send_spec_digest(all_spec_opportunities)
-
         send_summary(len(bid_events), matched_count,
                      len(all_opportunities), errors)
 
-    print(f"\n[Seated] Done — {len(all_opportunities)} forward-arb opps, "
-          f"{len(all_spec_opportunities)} spec opps")
-    return len(all_opportunities) + len(all_spec_opportunities)
+    print(f"\n[Seated] Done — {len(all_opportunities)} forward-arb opps")
+    return len(all_opportunities)
 
 
 def main():
