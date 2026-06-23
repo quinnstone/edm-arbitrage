@@ -76,6 +76,11 @@ class SpeculativeOpportunity:
     bid_trend: Optional[str]   # "up", "down", "stable", or None
     ask_trend: Optional[str]   # "up" = source cost rising (risk), "down" = cheaper
     fees_estimated: bool       # True when sell_price includes estimated buyer fees
+    # Persistence signals: how long the oldest still-active bid/ask has
+    # been on the book. Old bid → demand is sticky (confidence). Old ask
+    # → supply is sticky (less likely to evaporate before TP sells).
+    oldest_bid_age_hours: Optional[float] = None
+    oldest_ask_age_hours: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +501,8 @@ def find_opportunities(
 
         bid_trend = get_bid_trend(slug)
         ask_trend = get_ask_trend(slug)
+        oldest_bid_age = get_oldest_bid_age_hours(slug)
+        oldest_ask_age = get_oldest_ask_age_hours(slug)
 
         # Check each platform — find the best spread
         best = None
@@ -530,6 +537,8 @@ def find_opportunities(
                 bid_trend=bid_trend,
                 ask_trend=ask_trend,
                 fees_estimated=opp.fees_estimated,
+                oldest_bid_age_hours=oldest_bid_age,
+                oldest_ask_age_hours=oldest_ask_age,
             )
 
             if best is None or candidate.est_profit > best.est_profit:
@@ -655,6 +664,16 @@ def send_alerts(opportunities: list[SpeculativeOpportunity]) -> int:
         return 0
 
 
+def _format_age(hours: Optional[float]) -> Optional[str]:
+    """Render a persistence age compactly. Returns None when too fresh
+    to be informative (< 2h) so we don't clutter alerts with noise."""
+    if hours is None or hours < 2:
+        return None
+    if hours < 48:
+        return f"{int(hours)}h"
+    return f"{int(hours / 24)}d"
+
+
 def _format_alert(opp: SpeculativeOpportunity) -> dict:
     """Format a speculative listing opportunity as a Discord embed."""
     cv = opp.crowdvolt_event
@@ -674,6 +693,12 @@ def _format_alert(opp: SpeculativeOpportunity) -> dict:
         signals.append("CV asks falling (cheaper sourcing)")
     if opp.bid_trend == "up":
         signals.append("bids trending up")
+    bid_age = _format_age(opp.oldest_bid_age_hours)
+    if bid_age:
+        signals.append(f"oldest bid {bid_age}")
+    ask_age = _format_age(opp.oldest_ask_age_hours)
+    if ask_age:
+        signals.append(f"oldest ask {ask_age}")
 
     fee_pct = int(opp.seller_fee_pct * 100)
     price_note = " (est.)" if opp.fees_estimated else ""

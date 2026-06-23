@@ -26,7 +26,27 @@ jobs:
       - name: Install Playwright browsers
         run: playwright install chromium --with-deps
 
+      # Separate cache namespace from scan.yml. The two workflows write
+      # disjoint files in data/ (seated_scanner only touches
+      # seated_spec_sent.json), but cache save snapshots the entire
+      # directory — sharing a key prefix would let each workflow revert
+      # the other's updates.
+      - name: Restore tracking data
+        uses: actions/cache/restore@v4
+        with:
+          path: data/
+          key: seated-tracking-${{ github.run_id }}
+          restore-keys: |
+            seated-tracking-
+
       - name: Run seated venue scan
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python seated_scanner.py
+
+      - name: Save tracking data
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/
+          key: seated-tracking-${{ github.run_id }}

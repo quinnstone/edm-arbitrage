@@ -293,11 +293,19 @@ def fetch_section_listings(event_url: str) -> list[SectionListing]:
                 )
 
                 def on_response(response):
-                    if "listings/internal/event-v2" in response.url:
-                        try:
-                            api_data.append(response.json())
-                        except Exception:
-                            pass
+                    if "listings/internal/event-v2" not in response.url:
+                        return
+                    if response.status != 200:
+                        ct = response.headers.get("content-type", "")
+                        print(f"  [Seated] Listings API blocked: "
+                              f"HTTP {response.status} (ct={ct})")
+                        return
+                    try:
+                        api_data.append(response.json())
+                    except Exception as e:
+                        ct = response.headers.get("content-type", "")
+                        print(f"  [Seated] Listings JSON parse failed: "
+                              f"{e} (ct={ct})")
 
                 page.on("response", on_response)
                 page.goto(event_url, wait_until="networkidle", timeout=30000)
