@@ -2,9 +2,23 @@ name: Ticket Arbitrage Scan
 
 on:
   schedule:
-    # Run every 15 minutes
-    - cron: "*/15 * * * *"
+    # Two staggered crons so each 15-min slot has two independent
+    # trigger attempts ~7-8 min apart. GitHub Actions drops cron
+    # triggers under load — having two crons effectively doubles the
+    # odds any given window catches a scan.
+    - cron: "0,15,30,45 * * * *"
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch: # Allow manual triggers
+
+# Serialize runs of this workflow. Scans take ~11 min and crons fire
+# every 7-8 min, so two scans could overlap — each would restore the
+# cache, run independently, and save back their pre-overlap snapshot,
+# silently rolling back the other's state writes (position monitor's
+# last_alert, spec digest's slot dedup, etc.). cancel-in-progress=false
+# queues the second trigger instead of killing the first.
+concurrency:
+  group: ticket-arbitrage-scan
+  cancel-in-progress: false
 
 jobs:
   scan:
