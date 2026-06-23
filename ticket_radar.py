@@ -65,8 +65,9 @@ SOURCE_FEES = {
     "DICE": 0.10,                   # DICE charges a service fee, ~10%
 }
 
-# CV seller fee — used when computing net resale on CV
-CV_SELLER_FEE = 0.10                # CrowdVolt's 10% take from seller payouts
+# CrowdVolt's seller fee is already baked into bid.all_in_price (CV's
+# API returns bids net of the seller's cut — see the comment in
+# skydeck_scanner.py). No additional deduction needed in profit calcs.
 
 HEADERS = {
     "User-Agent": (
@@ -647,11 +648,14 @@ def _fetch_dice(url: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def _profit_against_cv(cost: float, cv_bid: Optional[float]) -> float:
-    """Net profit if we acquire at `cost` and sell on CV at the top bid."""
+    """Net profit if we acquire at `cost` and sell on CV at the top bid.
+
+    cv_bid is bid.all_in_price (already net of CV's seller fee per the
+    API). Subtract acquisition cost directly.
+    """
     if cv_bid is None or cost is None:
         return 0.0
-    payout = cv_bid * (1 - CV_SELLER_FEE)
-    return round(payout - cost, 2)
+    return round(cv_bid - cost, 2)
 
 
 def _all_in_cost(base_price: float, platform: str) -> float:

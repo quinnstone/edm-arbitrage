@@ -52,7 +52,10 @@ NOT_FOUND_RECHECK_DAYS = 3  # re-probe "Event Not Found" slots after this
 SWEEP_START = 1             # first-ever sweep lower bound
 SWEEP_FORWARD = 10          # how far past max known s-number to probe
 ALERT_COOLDOWN_HOURS = 23
-CV_SELLER_FEE = 0.10        # CrowdVolt's cut when you fill a bid as seller
+# CrowdVolt's fee is already baked into bid.all_in_price (the API returns
+# it net of the seller's cut — Rufus front-GA bid price $640 ships as
+# all_in_price $618, a ~3.4% reduction matching CV's actual take). So no
+# additional fee deduction is needed when computing profit from a bid.
 
 # JSON-LD names Tao uses as placeholders before announcing the artist —
 # when seen, fall back to the <title> for the real name.
@@ -425,12 +428,13 @@ def scan(cv_events: list, dry_run: bool = False) -> list:
                 print(f"  [Skydeck] {tao.name!r} [{fam}]: nothing fulfillable in stock — no flag")
                 continue
             if top_bid > face["price"]:
-                payout = top_bid * (1 - CV_SELLER_FEE)
+                # top_bid is bid.all_in_price (already net of CV's seller
+                # fee per the API). Subtract the Tao face directly.
                 arbs.append(SkydeckArb(
                     cv_event=cv, tao=tao,
                     face_price=face["price"], face_tier=face["name"],
                     cv_bid=top_bid,
-                    est_profit=round(payout - face["price"], 2),
+                    est_profit=round(top_bid - face["price"], 2),
                 ))
                 print(f"  [Skydeck] ARB [{fam}]: {tao.name!r} bid ${top_bid:.0f} > "
                       f"face ${face['price']:.0f} ({face['name']})")
