@@ -388,8 +388,9 @@ def fetch_event(slug: str, retries: int = 2) -> Optional[CrowdVoltEvent]:
 def fetch_all_events() -> list[CrowdVoltEvent]:
     """Fetch all active CrowdVolt events with marketplace data.
 
-    Uses a thread pool to fetch pages concurrently (respecting a semaphore
-    so we don't hammer CrowdVolt too hard).
+    Uses a thread pool to fetch pages concurrently. ThreadPoolExecutor
+    caps concurrency on its own — a separate semaphore at the same
+    bound would be redundant.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
@@ -400,19 +401,22 @@ def fetch_all_events() -> list[CrowdVoltEvent]:
 
     events = []
     lock = threading.Lock()
-    # Limit concurrency to 10 parallel requests
-    semaphore = threading.Semaphore(10)
 
     failed_slugs = []
     failed_lock = threading.Lock()
 
     def _fetch_one(slug: str, index: int):
-        with semaphore:
-            event = fetch_event(slug)
-            time.sleep(0.15)  # small delay per request
+        event = fetch_event(slug)
+        time.sleep(0.15)  # small per-worker delay so we don't hammer CV
         return index, slug, event
 
-    with ThreadPoolExecutor(max_workers=10) as pool:
+    # 20 workers — CV scrape was 65% of scan time at 10 workers (~5.5 min
+    # on a 250-event book). Doubling cuts that to ~3 min and brings the
+    # total scan well under the 15-min cron interval, so GHA's "previous
+    # run still active" skip-condition no longer fires. fetch_event has
+    # 429/5xx retry with backoff, so any rate-limit pushback degrades
+    # gracefully instead of failing.
+    with ThreadPoolExecutor(max_workers=20) as pool:
         futures = {
             pool.submit(_fetch_one, slug, i): slug
             for i, slug in enumerate(slugs)
