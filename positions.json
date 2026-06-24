@@ -35,6 +35,22 @@
       "platform": "TickPick",
       "listed_price": 84,
       "status": "sold"
+    },
+    {
+      "event": "Charlotte de Witte b2b Yousuke Yukimatsu",
+      "event_date": "2026-08-08",
+      "venue": "Under the K Bridge",
+      "platform": "TickPick",
+      "listed_price": 137,
+      "status": "open"
+    },
+    {
+      "event": "Charlotte de Witte b2b Yousuke Yukimatsu",
+      "event_date": "2026-08-08",
+      "venue": "Under the K Bridge",
+      "platform": "StubHub",
+      "listed_price": 137,
+      "status": "open"
     }
   ]
 }
