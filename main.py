@@ -49,12 +49,17 @@ def scan_once() -> int:
     # tickets directly via fan-to-fan transfer, so it needs the broader set.
     upcoming_events = list(cv_events)
 
-    # Filter out DICE-only events — tickets require in-app transfer
-    # and can't be fulfilled with third-party QR codes from StubHub, etc.
+    # DICE events: spec-only path, no forward arb. Operator can't reliably
+    # acquire a DICE-issued ticket on a 3P platform to fill a CV bid (tickets
+    # are wallet-bound). But the reverse — listing on 3P and sourcing from
+    # CV when sold — is workable for events where 3P listings exist. Lean
+    # scan: include DICE in the matcher loop but skip the slow StubHub
+    # scraper for those events (low hit rate, expensive). Forward arb
+    # alerts are filtered downstream.
     dice_events = [e for e in cv_events if e.ticket_platform.upper() == "DICE"]
-    cv_events = [e for e in cv_events if e.ticket_platform.upper() != "DICE"]
-    print(f"[Scan] Filtered out {len(dice_events)} DICE-only events "
-          f"({len(cv_events)} remaining)")
+    print(f"[Scan] {len(dice_events)} DICE events kept for spec digest "
+          f"(forward arb + StubHub search skipped on those); "
+          f"{len(cv_events) - len(dice_events)} non-DICE events scanned both directions")
 
     # Filter out seated venues — section-based pricing makes lowest
     # third-party price meaningless vs CrowdVolt bids for specific sections.
@@ -153,18 +158,22 @@ def scan_once() -> int:
 
         # --- Playwright-based sources (slower, headless browser) ---
 
-        # Search StubHub — try each query, break when we get a matched opportunity
+        # Search StubHub — skip for DICE events: tickets are wallet-bound so
+        # StubHub almost never lists them, and the scraper is 7-12s/query.
+        # Spec digest still has TickPick / VividSeats / Gametime coverage on
+        # DICE events via the matchers below.
         sh_opps = []
-        for q in queries:
-            try:
-                sh_results = stubhub.search_events(q, date_str)
-                if sh_results:
-                    sh_opps = matcher.match_stubhub(cv_event, sh_results)
-                    if sh_opps:
-                        break
-            except Exception as e:
-                print(f"  [StubHub] Error on query '{q}': {e}")
-                errors += 1
+        if cv_event.ticket_platform.upper() != "DICE":
+            for q in queries:
+                try:
+                    sh_results = stubhub.search_events(q, date_str)
+                    if sh_results:
+                        sh_opps = matcher.match_stubhub(cv_event, sh_results)
+                        if sh_opps:
+                            break
+                except Exception as e:
+                    print(f"  [StubHub] Error on query '{q}': {e}")
+                    errors += 1
         if sh_opps:
             event_matched = True
             for opp in sh_opps:
@@ -216,12 +225,17 @@ def scan_once() -> int:
 
     # Step 3: Filter to real opportunities and notify
     real_opps = _filter_opportunities(all_opportunities)
-    print(f"\n[Scan] {len(real_opps)} opportunities passed filters")
+    # DICE: spec-only — exclude from forward-arb alerts.
+    forward_opps = [o for o in real_opps
+                    if o.crowdvolt_event.ticket_platform.upper() != "DICE"]
+    dice_in_forward = len(real_opps) - len(forward_opps)
+    print(f"\n[Scan] {len(forward_opps)} forward-arb opportunities passed filters "
+          f"({dice_in_forward} DICE excluded — spec only)")
     print(f"[Scan] {match_failures} events had no cross-platform match")
 
     # Group opportunities by CrowdVolt event so we send one alert per event
     by_event: dict[str, list] = {}
-    for opp in real_opps:
+    for opp in forward_opps:
         slug = opp.crowdvolt_event.slug
         by_event.setdefault(slug, []).append(opp)
 

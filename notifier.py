@@ -139,7 +139,7 @@ def send_summary(
             "title": "Scan Complete",
             "description": (
                 f"**{total_events}** CrowdVolt events scanned\n"
-                f"**{dice_filtered}** DICE-only events filtered out\n"
+                f"**{dice_filtered}** DICE-only events (spec digest only)\n"
                 f"**{events_with_bids}** with waiting buyers · "
                 f"**{asks_only}** sellers only\n"
                 f"**{opportunities}** arbitrage opportunities found\n"
