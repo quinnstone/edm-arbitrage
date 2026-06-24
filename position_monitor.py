@@ -134,29 +134,19 @@ def _save_state(state: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _resolve(position: dict, cv_events: list):
-    """Match a position to a CV event by name fuzz + nightlife date, with
-    optional venue gate. When the position carries a "venue" field, the
-    venue match becomes the primary disambiguator and the name threshold
-    relaxes — necessary for b2b lineups where CV stores the event under
-    the billed-second artist (e.g. Charlotte de Witte b2b Yousuke Yukimatsu
-    is named "Yousuke Yukimatsu" on CV)."""
+    """Match a position to a CV event by name fuzz (>=70) + nightlife date."""
     try:
         target_date = dateparser.parse(str(position["event_date"]))
     except (TypeError, ValueError):
         return None
-
-    target_venue = (position.get("venue") or "").strip()
-    name_threshold = 30 if target_venue else 70
 
     best, best_score = None, 0
     for ev in cv_events:
         cv_local = matcher._localize_cv_date(ev)
         if cv_local is None or not matcher._dates_match(cv_local, target_date):
             continue
-        if target_venue and not matcher._venues_match(target_venue, ev.venue):
-            continue
         score = matcher._name_similarity(position["event"], ev.name)
-        if score >= name_threshold and score > best_score:
+        if score >= 70 and score > best_score:
             best, best_score = ev, score
     return best
 
