@@ -243,27 +243,11 @@ def scan_once() -> int:
         notifier.send_alert(opps)
         time.sleep(1)  # respect Discord rate limits
 
-    # Step 3b: Reddit ticket scan — treat r/avesNYC_tix selling posts as
-    # another acquisition source. Buy on Reddit at face/below-face, fill
-    # CV bids. Uses the broader catalog (DICE + seated included) since
-    # Reddit users can sell those directly via in-app transfer. NYC-only
-    # because the subreddit is NYC-specific. Wrapped in try/except so a
-    # Reddit failure can't break the main scan. quiet_if_empty=True
-    # suppresses the heartbeat "no arb today" digest at 15-min cadence —
-    # the daily groupme_scanner run still emits that for visibility.
-    try:
-        import reddit_tix_scanner
-        import matcher as _matcher
-        nyc_events = [
-            e for e in upcoming_events
-            if e.max_bid is not None and _matcher._cities_match(e.city, "New York")
-        ]
-        reddit_tix_scanner.scan(
-            cv_events=nyc_events,
-            quiet_if_empty=True,
-        )
-    except Exception as e:
-        print(f"[Reddit Tix] Inline scan failed (main scan continues): {e}")
+    # Step 3b (removed): the Reddit Tix scanner against r/avesNYC_tix has
+    # been broken in production for the past week — both Reddit's API and
+    # the PullPush fallback return 403/503 on every call. The scanner file
+    # (reddit_tix_scanner.py) is left in place but no longer called from
+    # the main scan. To revive, restore the try/except block here.
 
     # Step 3c: Marquee Skydeck face-value arb — flag CV buyer offers that
     # exceed Tao primary face value when the primary isn't sold out (buy
