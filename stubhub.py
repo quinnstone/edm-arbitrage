@@ -225,41 +225,43 @@ def _parse_search_cards(page) -> list[StubHubEvent]:
 
 
 def _fetch_event_price(page, event_url: str) -> Optional[tuple[float, bool]]:
-    """Navigate to a StubHub event page and extract the lowest all-in price."""
+    """Navigate to a StubHub event page and extract the true all-in price.
+
+    Only accepts prices from the visible "$X incl. fees" text — which
+    corresponds to a real, buyable listing on the page. The JSON-LD
+    schema.org lowPrice we used to fall back on is a marketing "starting
+    from" floor that doesn't correspond to any actual available listing
+    (observed live: Mason Collective JSON-LD $21 vs actual visible $78,
+    Rufus du Sol JSON-LD $160 vs actual visible $299 — ratios of 3.7x and
+    1.87x respectively, way beyond any fee-rate error). Returning None
+    on miss is safer than emitting an alert with a phantom price.
+    """
     try:
         page.goto(event_url, wait_until="domcontentloaded", timeout=15000)
 
-        # Wait for ticket listing prices to render (JS-rendered, takes a moment)
+        # Wait for ticket listings to render — only gate on the actual
+        # "incl. fees" text now (JSON-LD alone would proceed but we
+        # deliberately no longer trust it, so waiting for it is pointless).
         try:
             page.wait_for_function(
-                "() => document.body.innerText.includes('incl. fees') || document.querySelector('script[type=\"application/ld+json\"]')",
+                "() => document.body.innerText.includes('incl. fees')",
                 timeout=12000,
             )
         except PwTimeout:
             pass
 
-        # Prefer the "incl. fees" price from the page — it's the real all-in
         body = page.inner_text("body")
         match = re.search(r'\$(\d+(?:,\d{3})*)\s*incl\.\s*fees', body)
         if match:
             return float(match.group(1).replace(",", "")), True
 
-        # Fallback: JSON-LD lowPrice (base price before fees)
-        ld_blocks = page.evaluate("""() => {
-            const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-            return Array.from(scripts).map(s => s.textContent);
-        }""")
-
-        for block in (ld_blocks or []):
-            try:
-                data = json.loads(block)
-                if data.get("@type") in ("MusicEvent", "Event", "Festival"):
-                    offers = data.get("offers", {})
-                    low = offers.get("lowPrice")
-                    if low is not None:
-                        return float(low), False
-            except (json.JSONDecodeError, TypeError, ValueError):
-                continue
+        # No "incl. fees" text visible on the page — return None. Do NOT
+        # fall back to JSON-LD lowPrice (it's a marketing floor, not a
+        # real listing price). Log why so we can measure coverage loss.
+        if len(body) < 500:
+            print(f"  [StubHub] No real listings visible (page body {len(body)}b — likely captcha)")
+        else:
+            print(f"  [StubHub] Page loaded ({len(body)}b) but no '$X incl. fees' text found — no alert")
 
     except Exception as e:
         print(f"  [StubHub] Failed to fetch event page price: {e}")
