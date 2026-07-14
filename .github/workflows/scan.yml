@@ -59,6 +59,11 @@ jobs:
         env:
           SEATGEEK_CLIENT_ID: ${{ secrets.SEATGEEK_CLIENT_ID }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Unbuffered stdout so we can see the exact line before any hang.
+          # Historical scans have gone silent for 19+ minutes with no
+          # output — that's the buffer, not the process, being idle. This
+          # makes hang points visible in real time.
+          PYTHONUNBUFFERED: "1"
         run: python main.py
 
       - name: Save tracking data

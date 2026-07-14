@@ -10,6 +10,7 @@ import argparse
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
 from datetime import datetime
 
 import config
@@ -22,6 +23,24 @@ import stubhub
 import tickpick
 import undercut
 import vividseats
+
+
+def _run_with_timeout(fn, timeout_sec: int, label: str):
+    """Execute fn() in a worker thread with a hard timeout. Returns fn's
+    result or None on timeout. The worker thread continues running in the
+    background if timed out (may leak Playwright browser processes) but
+    the main thread is guaranteed to return control — that's what matters
+    when a downstream step silently hangs. GH Actions cleans up the whole
+    process tree at job end regardless."""
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn)
+    try:
+        return future.result(timeout=timeout_sec)
+    except _FuturesTimeout:
+        print(f"  [Timeout] {label} exceeded {timeout_sec}s — moving on", flush=True)
+        return None
+    finally:
+        executor.shutdown(wait=False)
 
 
 def scan_once() -> int:
@@ -160,38 +179,57 @@ def scan_once() -> int:
 
         # Search StubHub — skip for DICE events: tickets are wallet-bound so
         # StubHub almost never lists them, and the scraper is 7-12s/query.
-        # Spec digest still has TickPick / VividSeats / Gametime coverage on
-        # DICE events via the matchers below.
+        # Wrapped in a hard 90s per-event timeout because StubHub uses
+        # Playwright and can silently hang in the sync API (browser process
+        # unresponsive). Losing 1 event's StubHub is better than the whole
+        # scan hanging past the workflow timeout.
         sh_opps = []
         if cv_event.ticket_platform.upper() != "DICE":
-            for q in queries:
-                try:
-                    sh_results = stubhub.search_events(q, date_str)
-                    if sh_results:
-                        sh_opps = matcher.match_stubhub(cv_event, sh_results)
-                        if sh_opps:
-                            break
-                except Exception as e:
-                    print(f"  [StubHub] Error on query '{q}': {e}")
-                    errors += 1
+            def _search_stubhub():
+                opps = []
+                for q in queries:
+                    try:
+                        results = stubhub.search_events(q, date_str)
+                        if results:
+                            matched = matcher.match_stubhub(cv_event, results)
+                            if matched:
+                                return matched
+                    except Exception as ex:
+                        print(f"  [StubHub] Error on query '{q}': {ex}", flush=True)
+                return opps
+            sh_opps = _run_with_timeout(
+                _search_stubhub,
+                timeout_sec=90,
+                label=f"StubHub for {cv_event.name}",
+            ) or []
+            if not sh_opps and not isinstance(sh_opps, list):
+                errors += 1
         if sh_opps:
             event_matched = True
             for opp in sh_opps:
                 _log_opportunity(opp)
             all_opportunities.extend(sh_opps)
 
-        # Search VividSeats — try each query, break when we get a matched opportunity
-        vs_opps = []
-        for q in queries:
-            try:
-                vs_results = vividseats.search_events(q, date_str)
-                if vs_results:
-                    vs_opps = matcher.match_vividseats(cv_event, vs_results)
-                    if vs_opps:
-                        break
-            except Exception as e:
-                print(f"  [VividSeats] Error on query '{q}': {e}")
-                errors += 1
+        # Search VividSeats — also Playwright, also anti-botted (Cloudflare
+        # challenge with 3 retry attempts internally). Same hard-timeout
+        # wrap as StubHub.
+        def _search_vividseats():
+            opps = []
+            for q in queries:
+                try:
+                    results = vividseats.search_events(q, date_str)
+                    if results:
+                        matched = matcher.match_vividseats(cv_event, results)
+                        if matched:
+                            return matched
+                except Exception as ex:
+                    print(f"  [VividSeats] Error on query '{q}': {ex}", flush=True)
+            return opps
+        vs_opps = _run_with_timeout(
+            _search_vividseats,
+            timeout_sec=60,
+            label=f"VividSeats for {cv_event.name}",
+        ) or []
         if vs_opps:
             event_matched = True
             for opp in vs_opps:
@@ -252,22 +290,32 @@ def scan_once() -> int:
     # Step 3c: Marquee Skydeck face-value arb — flag CV buyer offers that
     # exceed Tao primary face value when the primary isn't sold out (buy
     # at face, fill the bid). Makes zero Tao requests unless a bidded
-    # Skydeck event exists. Isolated so a Tao failure can't break the scan.
+    # Skydeck event exists. Wrapped with hard timeout — a hung Tao HTTP
+    # call was suspected as the post-matcher hang cause.
     try:
         import skydeck_scanner
-        skydeck_scanner.scan(cv_events=upcoming_events)
+        _run_with_timeout(
+            lambda: skydeck_scanner.scan(cv_events=upcoming_events),
+            timeout_sec=120,
+            label="Skydeck scan",
+        )
     except Exception as e:
-        print(f"[Skydeck] Inline scan failed (main scan continues): {e}")
+        print(f"[Skydeck] Inline scan failed (main scan continues): {e}", flush=True)
 
     # Step 3d: Open-position risk monitor — watches naked spec listings
     # recorded in positions.json and alerts when CV's cheapest ask erodes
     # the after-fee payout (thin < $5 margin / underwater / no supply).
-    # Problem-alerts only; isolated so a failure can't break the scan.
+    # Problem-alerts only; wrapped in hard timeout for the same reason as
+    # Skydeck.
     try:
         import position_monitor
-        position_monitor.scan(cv_events=upcoming_events)
+        _run_with_timeout(
+            lambda: position_monitor.scan(cv_events=upcoming_events),
+            timeout_sec=60,
+            label="Position monitor",
+        )
     except Exception as e:
-        print(f"[Positions] Inline monitor failed (main scan continues): {e}")
+        print(f"[Positions] Inline monitor failed (main scan continues): {e}", flush=True)
 
     # Step 4: Track bid/ask snapshots and evaluate speculative opportunities.
     undercut.save_bid_snapshot(cv_events)
