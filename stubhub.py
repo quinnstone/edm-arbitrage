@@ -238,14 +238,24 @@ def _fetch_event_price(page, event_url: str) -> Optional[tuple[float, bool]]:
     """
     try:
         page.goto(event_url, wait_until="domcontentloaded", timeout=15000)
+        page.wait_for_timeout(2000)  # brief pause for React app initialization
 
-        # Wait for ticket listings to render — only gate on the actual
-        # "incl. fees" text now (JSON-LD alone would proceed but we
-        # deliberately no longer trust it, so waiting for it is pointless).
+        # Fast captcha detection — DataDome walls serve ~1.5-3KB total
+        # (title-only page with a challenge script). Real StubHub event
+        # pages are 100KB+ with the actual React app rendered. Bail
+        # immediately on captcha instead of stalling for the full timeout.
+        html_len = len(page.content())
+        if html_len < 5000:
+            print(f"  [StubHub] Captcha wall ({html_len}b) — skipping fast")
+            return None
+
+        # Real page path — wait up to 8s for listings to render the
+        # "incl. fees" text. Real pages typically show it within 3-7s
+        # after the initial paint.
         try:
             page.wait_for_function(
                 "() => document.body.innerText.includes('incl. fees')",
-                timeout=12000,
+                timeout=8000,
             )
         except PwTimeout:
             pass
@@ -255,13 +265,10 @@ def _fetch_event_price(page, event_url: str) -> Optional[tuple[float, bool]]:
         if match:
             return float(match.group(1).replace(",", "")), True
 
-        # No "incl. fees" text visible on the page — return None. Do NOT
-        # fall back to JSON-LD lowPrice (it's a marketing floor, not a
-        # real listing price). Log why so we can measure coverage loss.
-        if len(body) < 500:
-            print(f"  [StubHub] No real listings visible (page body {len(body)}b — likely captcha)")
-        else:
-            print(f"  [StubHub] Page loaded ({len(body)}b) but no '$X incl. fees' text found — no alert")
+        # Real page loaded but no visible "incl. fees" — either the UI
+        # changed or genuinely no listings. Do NOT fall back to JSON-LD
+        # lowPrice (marketing floor, not a real listing price).
+        print(f"  [StubHub] Page loaded ({html_len}b) but no '$X incl. fees' text — no alert")
 
     except Exception as e:
         print(f"  [StubHub] Failed to fetch event page price: {e}")
