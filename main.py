@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -294,9 +295,15 @@ def scan_once() -> int:
     # call was suspected as the post-matcher hang cause.
     try:
         import skydeck_scanner
+        # 180s (up from 120s) — the periodic discovery sweep probes 40+ Tao
+        # slots serially with a 0.5s politeness delay each, which alone can
+        # take 40-90s. When Tao is slow (we've seen 502s), that pushes past
+        # 120s and the wrapper kills Skydeck mid-run, missing real arbs
+        # like Ranger Trucco. Non-discovery scans are still <10s so the
+        # higher ceiling only bites on rollover.
         _run_with_timeout(
             lambda: skydeck_scanner.scan(cv_events=upcoming_events),
-            timeout_sec=120,
+            timeout_sec=180,
             label="Skydeck scan",
         )
     except Exception as e:
@@ -482,6 +489,15 @@ def main():
                 break
     else:
         scan_once()
+        # Force process exit. Playwright browser processes launched via
+        # ThreadPoolExecutor worker threads leave non-daemon threads alive
+        # for 18+ minutes after the scan completes, keeping Python running
+        # until the workflow timeout (35 min) fires SIGTERM and reports
+        # "cancelled" despite the scan actually succeeding. All state is
+        # already saved and Discord alerts already dispatched by this
+        # point, so a hard exit is safe. Reclaims runner minutes and gives
+        # accurate GH Actions status.
+        os._exit(0)
 
 
 if __name__ == "__main__":
