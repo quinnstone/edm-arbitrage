@@ -19,6 +19,7 @@ import crowdvolt
 import gametime
 import matcher
 import notifier
+import resident_advisor
 import seatgeek
 import stubhub
 import tickpick
@@ -254,6 +255,40 @@ def scan_once() -> int:
             for opp in gt_opps:
                 _log_opportunity(opp)
             all_opportunities.extend(gt_opps)
+
+        # Search Resident Advisor — scoped to events where CV has already
+        # tagged RA as the primary listing platform. RA doesn't sell
+        # tickets directly for most shows (LEGACY ticketing → external
+        # vendor at checkout), but the `cost` field is a reliable base
+        # price signal that the matcher inflates with the estimated ~15%
+        # buyer fee. Availability isn't checkable without auth — the
+        # operator verifies at click-through.
+        ra_opps = []
+        if cv_event.ticket_platform.lower() == "resident advisor":
+            def _search_ra():
+                opps = []
+                for q in queries:
+                    try:
+                        results = resident_advisor.search_events(
+                            q, date_str, city_hint=cv_event.city)
+                        if results:
+                            matched = matcher.match_resident_advisor(cv_event, results)
+                            if matched:
+                                return matched
+                    except Exception as ex:
+                        print(f"  [ResidentAdvisor] Error on query '{q}': {ex}",
+                              flush=True)
+                return opps
+            ra_opps = _run_with_timeout(
+                _search_ra,
+                timeout_sec=60,
+                label=f"ResidentAdvisor for {cv_event.name}",
+            ) or []
+        if ra_opps:
+            event_matched = True
+            for opp in ra_opps:
+                _log_opportunity(opp)
+            all_opportunities.extend(ra_opps)
 
         if not event_matched:
             print(f"  [No Match] Could not match on any platform")

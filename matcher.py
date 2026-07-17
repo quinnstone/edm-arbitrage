@@ -16,6 +16,7 @@ from stubhub import StubHubEvent
 from tickpick import TickPickEvent
 from vividseats import VividSeatsEvent
 from gametime import GametimeEvent
+from resident_advisor import ResidentAdvisorEvent
 
 
 @dataclass
@@ -738,6 +739,76 @@ def match_gametime(
             source_platform="Gametime",
             source_price=round(all_in, 2),
             source_url=gt.url,
+            crowdvolt_ask=cv_event.min_ask,
+            crowdvolt_bid=cv_event.max_bid,
+            profit_vs_ask=None,
+            profit_vs_bid=None,
+            fees_estimated=estimated,
+        )
+
+        if cv_event.min_ask is not None:
+            opp.profit_vs_ask = round(cv_event.min_ask - all_in, 2)
+        if cv_event.max_bid is not None:
+            opp.profit_vs_bid = round(cv_event.max_bid - all_in, 2)
+
+        if best is None or opp.source_price < best.source_price:
+            best = opp
+
+    return [best] if best else []
+
+
+def match_resident_advisor(
+    cv_event: CrowdVoltEvent,
+    ra_events: list[ResidentAdvisorEvent],
+) -> list[ArbitrageOpportunity]:
+    """Find the cheapest matching RA listing for a CrowdVolt event.
+
+    RA is a listing platform pointing to external ticket primaries. The
+    `cost` field is a base-price string ("$70", "$20+", "£41+") — the
+    external vendor adds ~10-15% at checkout, so we apply the estimated
+    fee multiplier and mark fees_estimated=True.
+
+    Only called for CV events where ticket_platform == "Resident Advisor";
+    the search-side filter (name substring + artist-list overlap) handles
+    multi-artist billing where CV tags the event by a supporting act but
+    RA titles it by the headliner.
+    """
+    best = None
+    fee_rate = config.PLATFORM_FEES.get("ResidentAdvisor", 0.15)
+    cv_local_date = _localize_cv_date(cv_event)
+
+    for ra in ra_events:
+        if _is_junk(ra.name):
+            continue
+        # Name-similarity threshold is looser than other matchers because
+        # RA titles often prefix the artist with a promoter ("Teksupport:")
+        # or list multiple artists. The scraper already gated on
+        # title-substring OR artist-list overlap, so this is a second-line
+        # filter.
+        score = _name_similarity(cv_event.name, ra.name)
+        if score < 40:
+            continue
+        if not _dates_match(cv_local_date, ra.event_date):
+            continue
+        if not _cities_match(cv_event.city, ra.city):
+            continue
+        if not _venues_match(cv_event.venue, ra.venue):
+            continue
+        if ra.min_price is None:
+            continue
+
+        if ra.price_is_all_in:
+            all_in = ra.min_price
+            estimated = False
+        else:
+            all_in = ra.min_price * (1 + fee_rate)
+            estimated = True
+
+        opp = ArbitrageOpportunity(
+            crowdvolt_event=cv_event,
+            source_platform="ResidentAdvisor",
+            source_price=round(all_in, 2),
+            source_url=ra.url,
             crowdvolt_ask=cv_event.min_ask,
             crowdvolt_bid=cv_event.max_bid,
             profit_vs_ask=None,

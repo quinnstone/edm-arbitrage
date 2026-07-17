@@ -60,6 +60,10 @@ PLATFORM_FEES = {
     "VividSeats": 0.28,
     "TickPick": 0.0,
     "Gametime": 0.0,  # Gametime shows all-in prices (no hidden fees)
+    # RA is a listing platform pointing to external primaries (DICE,
+    # Eventbrite, etc.). The cost string is the base price; the external
+    # ticket vendor adds ~10-15% at checkout. Middle estimate.
+    "ResidentAdvisor": 0.15,
 }
 
 # Request settings
