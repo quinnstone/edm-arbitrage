@@ -302,9 +302,24 @@ def _discover(cache: dict) -> dict:
     else:
         numbers_to_probe.update(range(max_known + 1, max_known + 1 + SWEEP_FORWARD))
 
-    print(f"  [Skydeck] discovery probing {len(numbers_to_probe)} slots")
-    for s in sorted(numbers_to_probe):
-        ev = fetch_skydeck_page(s)
+    slots_to_probe = sorted(numbers_to_probe)
+    print(f"  [Skydeck] discovery probing {len(slots_to_probe)} slots")
+
+    # Parallel HTTP fetches. Serial 0.8s-politeness took ~2.8s/slot
+    # (fetch + delay), pushing 50-slot discovery to 140s and blowing past
+    # the outer wrapper timeout. Empirical measurement showed Tao serves
+    # consistent 1.4-1.8s regardless of concurrency, no 429/slowdown at
+    # 5 workers even under hammering — see notes below. Result: ~15s
+    # for 50 slots, 9x speedup, well under the wrapper budget.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _probe_one(s):
+        return s, fetch_skydeck_page(s)
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        results = list(pool.map(_probe_one, slots_to_probe))
+
+    for s, ev in results:
         if ev:
             known[str(s)] = {
                 "url": ev.url,
@@ -315,7 +330,6 @@ def _discover(cache: dict) -> dict:
             }
         else:
             known[str(s)] = {"not_found": True, "checked": now.isoformat()}
-        time.sleep(0.8)  # politeness toward Tao
 
     cache["slots"] = known
     cache["last_discovery"] = now.isoformat()

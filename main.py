@@ -330,15 +330,13 @@ def scan_once() -> int:
     # call was suspected as the post-matcher hang cause.
     try:
         import skydeck_scanner
-        # 180s (up from 120s) — the periodic discovery sweep probes 40+ Tao
-        # slots serially with a 0.5s politeness delay each, which alone can
-        # take 40-90s. When Tao is slow (we've seen 502s), that pushes past
-        # 120s and the wrapper kills Skydeck mid-run, missing real arbs
-        # like Ranger Trucco. Non-discovery scans are still <10s so the
-        # higher ceiling only bites on rollover.
+        # 90s — discovery is now parallel (5-worker ThreadPoolExecutor,
+        # ~15s for 50 slots down from ~140s serial). Non-discovery scans
+        # complete in <10s. 90s gives 4-5x headroom for Tao slowness or
+        # transient 502s without wasting scan budget.
         _run_with_timeout(
             lambda: skydeck_scanner.scan(cv_events=upcoming_events),
-            timeout_sec=180,
+            timeout_sec=90,
             label="Skydeck scan",
         )
     except Exception as e:
