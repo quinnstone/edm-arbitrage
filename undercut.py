@@ -508,12 +508,28 @@ def find_opportunities(
         best = None
         for opp in opps:
             platform = opp.source_platform
-            seller_fee = SELLER_FEES.get(platform, 0.125)
 
-            # The 3P price is what buyers pay on that platform.
-            # If we list at that price, we'd receive: price * (1 - seller_fee)
+            # Only consider platforms we can actually list on. Skips
+            # Resident Advisor (a listing directory pointing to external
+            # primaries — we can't sell there) and any future platforms
+            # not in the seller-fee table.
+            if platform not in SELLER_FEES:
+                continue
+
+            seller_fee = SELLER_FEES[platform]
+            buyer_fee = config.PLATFORM_FEES.get(platform, 0)
+
+            # The scraped source_price is the BUYER's all-in cost — buyer
+            # fees are already baked in (either via the "$X incl. fees"
+            # text on the page, or via matcher.py inflating base * (1 +
+            # buyer_fee)). To make a buyer see that same all-in on our
+            # listing, we set a list price of source_price / (1 + buyer_fee).
+            # Payout is then list_price * (1 - seller_fee). Treating the
+            # buyer all-in as our list price pocketed the buyer fee as
+            # phantom profit — inflated StubHub/VividSeats margins by ~28%.
             sell_price = opp.source_price
-            payout = sell_price * (1 - seller_fee)
+            list_price = sell_price / (1 + buyer_fee) if buyer_fee > 0 else sell_price
+            payout = list_price * (1 - seller_fee)
             profit = payout - cv.min_ask
 
             if profit < config.MIN_SPEC_PROFIT:

@@ -51,6 +51,10 @@ DISCOVERY_TTL_HOURS = 6     # how often the s-number sweep refreshes
 NOT_FOUND_RECHECK_DAYS = 3  # re-probe "Event Not Found" slots after this
 SWEEP_START = 1             # first-ever sweep lower bound
 SWEEP_FORWARD = 10          # how far past max known s-number to probe
+MAX_LOOKAHEAD = 50          # bounded exploration window past max_found —
+                            # prevents the not_found tail from drifting
+                            # forever (prod had accumulated ~1000 stale
+                            # slots when max_known drove the frontier).
 ALERT_COOLDOWN_HOURS = 23
 # CrowdVolt's fee is already baked into bid.all_in_price (the API returns
 # it net of the seller's cut — Rufus front-GA bid price $640 ships as
@@ -282,11 +286,32 @@ def _discover(cache: dict) -> dict:
     now = datetime.now()
     known = cache.get("slots", {})
 
+    # Anchor exploration to slots that have actual events (max_found), not
+    # to the highest tracked slot (max_known — which included the accumulated
+    # not_found tail). The previous logic drove the frontier forward by
+    # SWEEP_FORWARD every discovery cycle regardless of whether any real
+    # events showed up, letting the not_found set grow unbounded (~1000
+    # entries in prod, timing out the wrapper even with parallel probing).
+    max_found = SWEEP_START - 1
+    for s_str, meta in known.items():
+        if not meta.get("not_found"):
+            max_found = max(max_found, int(s_str))
+    horizon = max_found + MAX_LOOKAHEAD
+
+    # One-time (and steady-state) cleanup: drop not_found entries past the
+    # horizon. Bounds the cache to ~max_found + MAX_LOOKAHEAD slots.
+    orig_size = len(known)
+    known = {
+        s: meta for s, meta in known.items()
+        if not (meta.get("not_found") and int(s) > horizon)
+    }
+    pruned = orig_size - len(known)
+
     numbers_to_probe = set()
-    max_known = SWEEP_START - 1
+    max_tracked = SWEEP_START - 1
     for s_str, meta in known.items():
         s = int(s_str)
-        max_known = max(max_known, s)
+        max_tracked = max(max_tracked, s)
         if meta.get("not_found"):
             checked = meta.get("checked", "2000-01-01")
             try:
@@ -300,10 +325,14 @@ def _discover(cache: dict) -> dict:
         # First-ever sweep — bounded wide scan
         numbers_to_probe.update(range(SWEEP_START, SWEEP_START + 80))
     else:
-        numbers_to_probe.update(range(max_known + 1, max_known + 1 + SWEEP_FORWARD))
+        forward_upper = min(max_tracked + SWEEP_FORWARD, horizon)
+        if forward_upper > max_tracked:
+            numbers_to_probe.update(range(max_tracked + 1, forward_upper + 1))
 
     slots_to_probe = sorted(numbers_to_probe)
-    print(f"  [Skydeck] discovery probing {len(slots_to_probe)} slots")
+    pruned_note = f", pruned {pruned}" if pruned else ""
+    print(f"  [Skydeck] discovery probing {len(slots_to_probe)} slots "
+          f"(max_found={max_found}, horizon={horizon}{pruned_note})")
 
     # Parallel HTTP fetches. Serial 0.8s-politeness took ~2.8s/slot
     # (fetch + delay), pushing 50-slot discovery to 140s and blowing past
