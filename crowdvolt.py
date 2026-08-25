@@ -9,19 +9,28 @@ from datetime import datetime
 from typing import Optional
 
 import requests
+from curl_cffi import requests as cf_requests
+from curl_cffi.requests.exceptions import RequestException as _CfRequestException
 from dateutil import parser as dateparser
 
 import config
 
+# CrowdVolt moved behind a Cloudflare JS challenge (~2026-08-19). Desktop
+# Chrome/Firefox TLS fingerprints get a "Just a moment..." interstitial;
+# mobile Safari passes clean. curl_cffi's TLS impersonation bypasses the
+# challenge without needing a real browser. If safari17_2_ios eventually
+# gets blocked too, rotate to the next iOS Safari profile — do NOT fall
+# back silently, because we get workflow-failure emails and want to keep
+# that signal loud.
+CV_IMPERSONATE = "safari17_2_ios"
+
 PREMIUM_KEYWORDS = {"vip", "platinum", "backstage", "meet & greet", "meet and greet"}
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-}
+# NOTE: Do NOT set a User-Agent header on cf_requests calls to CV — curl_cffi
+# generates a consistent Safari iOS UA from the impersonate profile, and
+# overriding it with a desktop Chrome UA causes a TLS/UA mismatch that
+# Cloudflare's bot check catches. Kept for any non-CV usage only.
+HEADERS: dict = {}
 
 # CrowdVolt's client-side book API — the same endpoint the page calls
 # after hydration. Required by the gate: a magic header value sourced
@@ -30,7 +39,6 @@ HEADERS = {
 # only, no depth).
 BOOK_API_URL = "https://what.crowdvolt.com/api/book/get"
 BOOK_API_HEADERS = {
-    **HEADERS,
     "Referer": "https://www.crowdvolt.com/",
     "Content-Type": "application/json",
     "x-pokedex": "0376",
@@ -65,10 +73,11 @@ class CrowdVoltEvent:
 
 def fetch_sitemap() -> list[str]:
     """Fetch all event slugs from CrowdVolt's sitemap."""
-    resp = requests.get(
+    resp = cf_requests.get(
         f"{config.CROWDVOLT_BASE_URL}/sitemap.xml",
         timeout=config.REQUEST_TIMEOUT,
         headers=HEADERS,
+        impersonate=CV_IMPERSONATE,
     )
     resp.raise_for_status()
 
@@ -140,11 +149,12 @@ def _fetch_book_api(event_uqid: str, retries: int = 2) -> Optional[dict]:
     """
     for attempt in range(1 + retries):
         try:
-            resp = requests.get(
+            resp = cf_requests.get(
                 BOOK_API_URL,
                 params={"event_uqid": event_uqid},
                 headers=BOOK_API_HEADERS,
                 timeout=config.REQUEST_TIMEOUT,
+                impersonate=CV_IMPERSONATE,
             )
             if resp.status_code == 200:
                 return resp.json()
@@ -152,7 +162,7 @@ def _fetch_book_api(event_uqid: str, retries: int = 2) -> Optional[dict]:
                 time.sleep(2 * (attempt + 1))
                 continue
             return None
-        except (requests.RequestException, ValueError):
+        except (requests.RequestException, _CfRequestException, ValueError):
             if attempt < retries:
                 time.sleep(2 * (attempt + 1))
                 continue
@@ -311,14 +321,19 @@ def fetch_event(slug: str, retries: int = 2) -> Optional[CrowdVoltEvent]:
     url = f"{config.CROWDVOLT_BASE_URL}/event/{slug}"
     for attempt in range(1 + retries):
         try:
-            resp = requests.get(url, timeout=config.REQUEST_TIMEOUT, headers=HEADERS)
+            resp = cf_requests.get(
+                url,
+                timeout=config.REQUEST_TIMEOUT,
+                headers=HEADERS,
+                impersonate=CV_IMPERSONATE,
+            )
             if resp.status_code == 200:
                 break
             if resp.status_code in (429, 500, 502, 503, 504) and attempt < retries:
                 time.sleep(2 * (attempt + 1))  # backoff: 2s, 4s
                 continue
             return None
-        except requests.RequestException:
+        except (requests.RequestException, _CfRequestException):
             if attempt < retries:
                 time.sleep(2 * (attempt + 1))
                 continue

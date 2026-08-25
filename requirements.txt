@@ -1,4 +1,5 @@
 requests>=2.31.0
+curl_cffi>=0.13.0
 beautifulsoup4>=4.12.0
 thefuzz>=0.22.0
 python-Levenshtein>=0.25.0
