@@ -30,7 +30,10 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45  # 2026-08-25: raised from 35 — matcher takes
+                         # 30+ min at current event volume (280+ active).
+                         # 45 leaves ~8-10 min buffer for Skydeck +
+                         # position monitor + alert send + spec digest.
 
     steps:
       - uses: actions/checkout@v4

@@ -52,23 +52,22 @@ def search_events(query: str, date_str: Optional[str] = None) -> list[VividSeats
                 page.goto(url, wait_until="domcontentloaded", timeout=20000)
 
                 # VividSeats serves a JS challenge page first (~5s) that
-                # auto-solves and reloads. Wait for the real page to appear.
-                # Retry up to 3 times if the challenge doesn't resolve.
+                # normally auto-solves and reloads. Wait once for the real
+                # page to appear. Retries were removed 2026-08-25: production
+                # data showed they never actually recovered a challenge —
+                # they just burned ~45s per blocked event before the outer
+                # wrapper killed the call. Single-shot means blocked events
+                # cost ~15s not 45s+, saving multiple minutes per scan when
+                # VS's challenge is aggressive.
                 loaded = False
-                for attempt in range(3):
-                    try:
-                        page.wait_for_selector(
-                            "#__NEXT_DATA__, [data-testid='productions-list'] a, a[href*='/tickets/']",
-                            timeout=15000,
-                        )
-                        loaded = True
-                        break
-                    except PwTimeout:
-                        if attempt < 2:
-                            print(f"  [VividSeats] Challenge page attempt {attempt + 1}/3, retrying...")
-                            page.reload(wait_until="domcontentloaded", timeout=15000)
-                        else:
-                            print(f"  [VividSeats] Page did not load past challenge after 3 attempts")
+                try:
+                    page.wait_for_selector(
+                        "#__NEXT_DATA__, [data-testid='productions-list'] a, a[href*='/tickets/']",
+                        timeout=15000,
+                    )
+                    loaded = True
+                except PwTimeout:
+                    print(f"  [VividSeats] Challenge page did not resolve in 15s — skipping")
                 if not loaded:
                     return []
 
