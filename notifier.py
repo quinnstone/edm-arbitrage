@@ -6,16 +6,6 @@ import config
 from matcher import ArbitrageOpportunity, _localize_cv_date
 
 
-def _bounded_lines(lines, limit=1024):
-    chosen = []
-    for line in lines:
-        if len("\n".join(chosen + [line])) > limit - 32:
-            chosen.append("More comparisons in the scan log.")
-            break
-        chosen.append(line)
-    return "\n".join(chosen) or "See scan log."
-
-
 def _format_opportunity(opps: list[ArbitrageOpportunity]) -> dict:
     """Format a consolidated arbitrage alert for one CrowdVolt event.
 
@@ -23,12 +13,12 @@ def _format_opportunity(opps: list[ArbitrageOpportunity]) -> dict:
     one embed showing prices across platforms, the best arb, and links.
     """
     # Only include opportunities that have a bid to sell to
-    opps = [o for o in opps if o.tier_verified and o.profit_vs_bid is not None and o.profit_vs_bid > 0]
+    opps = [o for o in opps if o.profit_vs_bid is not None]
     if not opps:
         return None
 
-    # Rank by achievable lot profit; products may have different bid prices.
-    opps = sorted(opps, key=lambda o: o.profit_vs_bid * o.quantity, reverse=True)
+    # Sort cheapest first
+    opps = sorted(opps, key=lambda o: o.source_price)
     best = opps[0]
     cv = best.crowdvolt_event
 
@@ -37,7 +27,7 @@ def _format_opportunity(opps: list[ArbitrageOpportunity]) -> dict:
     # Price list across platforms
     price_lines = []
     for opp in opps:
-        label = f"{opp.source_platform} [{opp.ticket_type}, {opp.quantity} ticket(s)]"
+        label = opp.source_platform
         price_str = f"${opp.source_price:.0f}"
         if opp.fees_estimated:
             price_str += " (est. w/ fees)"
@@ -46,18 +36,17 @@ def _format_opportunity(opps: list[ArbitrageOpportunity]) -> dict:
     fields = [
         {
             "name": "Prices",
-            "value": _bounded_lines(price_lines),
+            "value": "\n".join(price_lines),
             "inline": True,
         },
         {
-            "name": "Matched CrowdVolt Offer",
+            "name": "Highest CrowdVolt Offer",
             "value": f"**${best.crowdvolt_bid:.0f}**",
             "inline": True,
         },
         {
             "name": "Best Arbitrage",
             "value": (
-                f"{best.ticket_type} · {best.quantity} ticket(s), prices/profit per ticket\n"
                 f"Buy on **{best.source_platform}** (${best.source_price:.0f})"
                 f" → Sell on **CrowdVolt** (${best.crowdvolt_bid:.0f})\n"
                 f"**+${best.profit_vs_bid:.0f}** ({margin:.1f}%)"
@@ -68,11 +57,11 @@ def _format_opportunity(opps: list[ArbitrageOpportunity]) -> dict:
 
     # Links
     link_parts = [f"[CrowdVolt]({cv.url})"]
-    for platform, url in dict.fromkeys((o.source_platform, o.source_url) for o in opps):
-        link_parts.append(f"[{platform}]({url})")
+    for opp in opps:
+        link_parts.append(f"[{opp.source_platform}]({opp.source_url})")
     fields.append({
         "name": "Links",
-        "value": _bounded_lines(link_parts),
+        "value": " | ".join(link_parts),
         "inline": False,
     })
 
@@ -126,8 +115,6 @@ def send_summary(
     match_failures: int = 0,
     dice_filtered: int = 0,
     undercut_sent: int = 0,
-    compared_events: int = None,
-    tier_unavailable: int = 0,
 ) -> bool:
     """Send a scan summary to Discord."""
     asks_only = total_events - events_with_bids
@@ -142,18 +129,16 @@ def send_summary(
     sources_str = " · ".join(sources)
 
     if events_with_bids == 0:
-        browser_note = "Reverse searches use TickPick and StubHub; other sources require waiting buyers"
+        browser_note = "StubHub/VividSeats/Gametime skipped (no waiting buyers)"
     else:
-        browser_note = "Reverse: TickPick/StubHub. Blocked or missing tier data produces no verified alert."
+        browser_note = f"StubHub/VividSeats/Gametime ran for **{events_with_bids}** events with waiting buyers"
 
     payload = {
         "username": "Ticket Arb",
         "embeds": [{
             "title": "Scan Complete",
             "description": (
-                f"**{total_events}** CrowdVolt events in scope\n"
-                f"**{compared_events if compared_events is not None else events_with_bids}** events sent to comparison\n"
-                f"**{tier_unavailable}** event/provider matches lacked tier metadata\n"
+                f"**{total_events}** CrowdVolt events scanned\n"
                 f"**{dice_filtered}** DICE-only events (spec digest only)\n"
                 f"**{events_with_bids}** with waiting buyers · "
                 f"**{asks_only}** sellers only\n"

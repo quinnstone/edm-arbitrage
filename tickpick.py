@@ -8,7 +8,7 @@ buyer fees on their platform.
 import re
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -35,8 +35,6 @@ class TickPickEvent:
     low_price: Optional[float]
     high_price: Optional[float]
     url: str
-    listings: list = field(default_factory=list)
-    tiers_checked: bool = False
 
 
 def _slugify_query(query: str) -> str:
@@ -168,6 +166,10 @@ def _parse_event(data: dict) -> Optional[TickPickEvent]:
     low_price = offers.get("lowPrice")
     high_price = offers.get("highPrice")
 
+    # Skip events with no pricing
+    if low_price is None:
+        return None
+
     # Parse date
     event_date = None
     if data.get("startDate"):
@@ -195,11 +197,3 @@ def _parse_event(data: dict) -> Optional[TickPickEvent]:
         high_price=float(high_price) if high_price else None,
         url=data.get("url", ""),
     )
-
-
-def enrich_with_listings(event: TickPickEvent) -> bool:
-    if not event.tiers_checked:
-        from listing_metadata import fetch_tickpick
-        event.listings = fetch_tickpick(event.url)
-        event.tiers_checked = True
-    return bool(event.listings)

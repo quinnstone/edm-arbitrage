@@ -1,7 +1,7 @@
 """Speculative listing arbitrage — list on 3P platforms, source from CrowdVolt.
 
 The strategy: CrowdVolt sellers price below mainstream market. List a ticket
-on TickPick/StubHub at market price (speculative — you don't have it yet).
+on StubHub/VividSeats at market price (speculative — you don't have it yet).
 When a buyer purchases on the 3P platform, buy from CrowdVolt at the lower
 ask price and transfer to fulfill the order.
 
@@ -81,8 +81,6 @@ class SpeculativeOpportunity:
     # → supply is sticky (less likely to evaporate before TP sells).
     oldest_bid_age_hours: Optional[float] = None
     oldest_ask_age_hours: Optional[float] = None
-    ticket_type: str = ""
-    quantity: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -149,13 +147,13 @@ def log_scan_results(
 
     Each line captures one CrowdVolt event with full supply depth
     (individual asks with prices, quantities, and ticket types),
-    cross-platform prices, demand signals, and speculative candidates.
+    cross-platform prices, demand signals, and alert outcomes.
 
     Key fields for speculative listing analysis:
     - crowdvolt.asks: supply depth — are there multiple sellers near min_ask?
     - crowdvolt.ask_range: price gap between cheapest and 3rd cheapest ask
     - platforms: what buyers are paying on 3P markets
-    - alert: legacy field for a speculative candidate, NOT confirmed delivery
+    - alert: whether this event was flagged, at what price, and est. profit
     """
     os.makedirs(_DATA_DIR, exist_ok=True)
     now = datetime.now()
@@ -172,16 +170,6 @@ def log_scan_results(
             "url": opp.source_url,
         }
 
-    product_comparisons = {}
-    for opp in all_opportunities:
-        product_comparisons.setdefault(opp.crowdvolt_event.slug, []).append({
-            "platform": opp.source_platform, "price": opp.source_price, "url": opp.source_url,
-            "ticket_type": opp.ticket_type, "quantity": opp.quantity,
-            "tier_verified": opp.tier_verified, "source_listing_id": opp.source_listing_id,
-            "cv_bid": opp.crowdvolt_bid, "cv_ask": opp.crowdvolt_ask,
-            "profit_vs_bid": opp.profit_vs_bid, "fees_estimated": opp.fees_estimated,
-        })
-
     # Index spec alerts by slug
     spec_by_slug: dict[str, "SpeculativeOpportunity"] = {}
     for s in (spec_opps or []):
@@ -189,7 +177,7 @@ def log_scan_results(
 
     with open(OPPORTUNITY_LOG, "a") as f:
         for ev in cv_events:
-            if not ev.asks and not ev.bids:
+            if ev.min_ask is None and ev.max_bid is None:
                 continue
 
             # Use venue-local date for days_until and the date field so a
@@ -213,7 +201,7 @@ def log_scan_results(
             if len(ga_bids) >= 3:
                 bid_range = round(ga_bids[0]["price"] - ga_bids[2]["price"], 2)
 
-            # Candidate data; notification delivery is reported by the caller.
+            # Alert outcome
             spec = spec_by_slug.get(ev.slug)
             alert_data = None
             if spec:
@@ -250,13 +238,11 @@ def log_scan_results(
                     "url": ev.url,
                 },
                 "platforms": platform_prices.get(ev.slug, {}),
-                "product_comparisons": product_comparisons.get(ev.slug, []),
-                "comparison_status": ev.comparison_status,
                 "alert": alert_data,
             }
             f.write(json.dumps(entry) + "\n")
 
-    count = sum(1 for ev in cv_events if ev.asks or ev.bids)
+    count = sum(1 for ev in cv_events if ev.min_ask is not None or ev.max_bid is not None)
     print(f"[Log] {count} events written to opportunity log")
 
 
@@ -462,14 +448,16 @@ def find_opportunities(
 
     Criteria:
     - CrowdVolt has active sellers (min_ask exists) — required to source
-    - TickPick/StubHub listing-level product and quantity match
-    - Configured minimum number of matching CrowdVolt asks
+    - At least 2 active CrowdVolt bids — multi-buyer demand confirmation
     - 3P market price > CrowdVolt ask + 3P seller fee (profitable)
     - Estimated profit >= MIN_SPEC_PROFIT
-    - Event has not passed
+    - Event is within 30 days
     """
     results = []
     today = datetime.now().date()
+
+    # Build event lookup for bid/ask counts
+    event_map = {e.slug: e for e in cv_events}
 
     # Group platform results by event
     by_event: dict[str, list[ArbitrageOpportunity]] = {}
@@ -481,11 +469,24 @@ def find_opportunities(
         cv = opps[0].crowdvolt_event
 
         # Must have CrowdVolt sellers to source from
-        if not cv.asks:
+        if cv.min_ask is None:
             continue
 
-        # Demand is not required for reverse candidates. Supply gates are
-        # applied per matching product and lot, never across unrelated tiers.
+        # Need at least two active bids — multi-buyer demand confirmation.
+        # A single bid is one cancellation away from being a no-demand event;
+        # spec listing commits to a 3P sale before sourcing, so we want
+        # independent confirmation that demand is real.
+        bid_count = len(cv.bids)
+        if bid_count < 2:
+            continue
+
+        # Need ample CV supply cushion. If only one seller exists, they
+        # could disappear between our 3P listing and the 3P sale, leaving
+        # us unable to fulfill. 3+ asks gives a fallback if the lowest
+        # disappears.
+        ask_count = len(cv.asks)
+        if ask_count < 3:
+            continue
 
         # Must be in the future (can't spec-list a past show). No upper
         # horizon — far-out events still surface so operator sees full
@@ -505,24 +506,13 @@ def find_opportunities(
 
         # Check each platform — find the best spread
         best = None
-        cheapest = {}
         for opp in opps:
-            key = (opp.source_platform, opp.ticket_type, opp.quantity)
-            if key not in cheapest or opp.source_price < cheapest[key].source_price:
-                cheapest[key] = opp
-        for opp in cheapest.values():
             platform = opp.source_platform
 
             # Only consider platforms we can actually list on. Skips
             # Resident Advisor (a listing directory pointing to external
             # primaries — we can't sell there) and any future platforms
             # not in the seller-fee table.
-            if platform not in config.REVERSE_PLATFORMS:
-                continue
-            if not opp.tier_verified or opp.crowdvolt_ask is None:
-                continue
-            if opp.matched_ask_count < config.SPEC_MIN_MATCHING_ASKS:
-                continue
             if platform not in SELLER_FEES:
                 continue
 
@@ -540,31 +530,29 @@ def find_opportunities(
             sell_price = opp.source_price
             list_price = sell_price / (1 + buyer_fee) if buyer_fee > 0 else sell_price
             payout = list_price * (1 - seller_fee)
-            profit = payout - opp.crowdvolt_ask
+            profit = payout - cv.min_ask
 
             if profit < config.MIN_SPEC_PROFIT:
                 continue
 
-            margin = (profit / opp.crowdvolt_ask) * 100
+            margin = (profit / cv.min_ask) * 100
 
             candidate = SpeculativeOpportunity(
                 crowdvolt_event=cv,
                 sell_platform=platform,
                 sell_price=sell_price,
                 sell_url=opp.source_url,
-                cv_ask=opp.crowdvolt_ask,
+                cv_ask=cv.min_ask,
                 seller_fee_pct=seller_fee,
                 est_payout=round(payout, 2),
                 est_profit=round(profit, 2),
                 margin_pct=round(margin, 1),
-                bid_count=opp.matched_bid_count,
-                ask_count=opp.matched_ask_count,
+                bid_count=bid_count,
+                ask_count=len(cv.asks),
                 days_until=days_until,
                 bid_trend=bid_trend,
                 ask_trend=ask_trend,
-                fees_estimated=opp.fees_estimated or buyer_fee > 0,
-                ticket_type=opp.ticket_type,
-                quantity=opp.quantity,
+                fees_estimated=opp.fees_estimated,
                 oldest_bid_age_hours=oldest_bid_age,
                 oldest_ask_age_hours=oldest_ask_age,
             )
@@ -733,7 +721,7 @@ def _format_alert(opp: SpeculativeOpportunity) -> dict:
 
     return {
         "title": f"Speculative Listing — {cv.name}",
-        "description": f"{cv.venue} — {cv.city} — {date_str}\n{opp.ticket_type} · {opp.quantity} ticket(s), prices per ticket",
+        "description": f"{cv.venue} — {cv.city} — {date_str}",
         "color": 0xFFA500,  # orange — distinct from green arb alerts
         "fields": [
             {
