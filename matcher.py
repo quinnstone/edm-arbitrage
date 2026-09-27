@@ -2,7 +2,7 @@
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -30,6 +30,78 @@ class ArbitrageOpportunity:
     profit_vs_ask: Optional[float]  # if you undercut the lowest ask
     profit_vs_bid: Optional[float]  # if you fill an existing bid
     fees_estimated: bool = False  # True when source_price includes an estimated fee
+    ticket_type: str = ""
+    quantity: int = 0
+    tier_verified: bool = False
+    source_listing_id: str = ""
+    matched_ask_count: int = 0
+    matched_bid_count: int = 0
+
+
+
+def _tier_opportunities(base, source, require_identity=False):
+    """Compare equivalent products and full available lots, never aggregate floors."""
+    from ticket_products import SourceListing, compatible, positive_price, row_restrictions, restriction_notes
+    if require_identity and (not base.crowdvolt_event.event_date or not getattr(source, 'event_date', None)
+                             or not base.crowdvolt_event.venue or not getattr(source, 'venue', '')
+                             or not base.crowdvolt_event.city or not getattr(source, 'city', '')):
+        base.crowdvolt_event.comparison_status[base.source_platform] = 'identity_unverified'
+        return [replace(base, crowdvolt_bid=None, crowdvolt_ask=None,
+                        profit_vs_bid=None, profit_vs_ask=None)]
+    if base.source_platform == "TickPick":
+        import tickpick
+        tickpick.enrich_with_listings(source)
+    listings = getattr(source, "listings", [])
+    if base.source_platform == "Gametime":
+        listings = [SourceListing(l.section, l.total, l.qty, l.listing_id,
+                                  allowed_quantities=getattr(l, 'allowed_quantities', ()), notes=restriction_notes(getattr(l, 'notes', ''), row_restrictions(l.row)))
+                    for l in listings]
+    if not listings:
+        base.crowdvolt_event.comparison_status[base.source_platform] = "tier_metadata_unavailable"
+        print(f"  [{base.source_platform}] Tier metadata unavailable — logged as unverified")
+        return [replace(base, crowdvolt_bid=None, crowdvolt_ask=None,
+                        profit_vs_bid=None, profit_vs_ask=None)]
+    cv = base.crowdvolt_event
+    result = []
+    seen = set()
+    source_name = getattr(source, 'name', getattr(source, 'title', ''))
+    for listing in listings:
+        # Unknown restrictions cannot be discarded to manufacture a match.
+        label = ' '.join(x for x in [listing.ticket_type, listing.notes] if x)
+        for quantity in listing.quantities():
+            for cv_type in {x.ticket_type for x in cv.asks + cv.bids}:
+                if not compatible(cv_type, label, cv.name, source_name):
+                    continue
+                bids = [b for b in cv.bids if b.ticket_type == cv_type
+                        and b.price_verified and positive_price(b.all_in_price) and b.qty == quantity]
+                asks = [a for a in cv.asks if a.ticket_type == cv_type
+                        and a.price_verified and positive_price(a.all_in_price) and a.qty == quantity]
+                if not listing.can_buy(quantity) or not positive_price(listing.all_in_price):
+                    continue
+                bid = max((b.all_in_price for b in bids), default=None)
+                ask = min((a.all_in_price for a in asks), default=None)
+                if bid is None and ask is None:
+                    continue
+                key = (cv_type, quantity, listing.all_in_price, bid, ask)
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(replace(base, source_price=listing.all_in_price,
+                    crowdvolt_bid=bid, crowdvolt_ask=ask,
+                    profit_vs_bid=round(bid - listing.all_in_price, 2) if bid is not None else None,
+                    profit_vs_ask=round(ask - listing.all_in_price, 2) if ask is not None else None,
+                    ticket_type=cv_type, quantity=quantity, tier_verified=True,
+                    source_listing_id=listing.listing_id,
+                    matched_bid_count=len({b.seller_id or b.listing_id or id(b) for b in bids}),
+                    matched_ask_count=len({a.seller_id or a.listing_id or id(a) for a in asks}),
+                    fees_estimated=listing.fees_estimated))
+    cv.comparison_status[base.source_platform] = "verified_products" if result else "no_compatible_product_or_quantity"
+    cheapest = {}
+    for opp in result:
+        key = (opp.ticket_type, opp.quantity)
+        if key not in cheapest or opp.source_price < cheapest[key].source_price:
+            cheapest[key] = opp
+    return list(cheapest.values())
 
 
 def _is_junk(name: str) -> bool:
@@ -492,7 +564,7 @@ def match_seatgeek(
     sg_events: list[SeatGeekEvent],
 ) -> list[ArbitrageOpportunity]:
     """Find the cheapest matching SeatGeek listing for a CrowdVolt event."""
-    best = None
+    verified = []
     fee_rate = config.PLATFORM_FEES.get("SeatGeek", 0)
     cv_local_date = _localize_cv_date(cv_event)
 
@@ -530,10 +602,9 @@ def match_seatgeek(
         if cv_event.max_bid is not None:
             opp.profit_vs_bid = round(cv_event.max_bid - all_in, 2)
 
-        if best is None or opp.source_price < best.source_price:
-            best = opp
+        verified.extend(_tier_opportunities(opp, sg, require_identity=True))
 
-    return [best] if best else []
+    return verified
 
 
 def match_tickpick(
@@ -541,7 +612,7 @@ def match_tickpick(
     tp_events: list[TickPickEvent],
 ) -> list[ArbitrageOpportunity]:
     """Find the cheapest matching TickPick listing for a CrowdVolt event."""
-    best = None
+    verified = []
     fee_rate = config.PLATFORM_FEES.get("TickPick", 0)
     cv_local_date = _localize_cv_date(cv_event)
 
@@ -558,9 +629,13 @@ def match_tickpick(
         if not _venues_match(cv_event.venue, tp.venue):
             continue
         if tp.low_price is None:
-            continue
-
-        all_in = tp.low_price * (1 + fee_rate)
+            import tickpick
+            tickpick.enrich_with_listings(tp)
+            if not tp.listings:
+                continue
+            all_in = min(row.all_in_price for row in tp.listings)
+        else:
+            all_in = tp.low_price * (1 + fee_rate)
 
         opp = ArbitrageOpportunity(
             crowdvolt_event=cv_event,
@@ -579,10 +654,9 @@ def match_tickpick(
         if cv_event.max_bid is not None:
             opp.profit_vs_bid = round(cv_event.max_bid - all_in, 2)
 
-        if best is None or opp.source_price < best.source_price:
-            best = opp
+        verified.extend(_tier_opportunities(opp, tp, require_identity=True))
 
-    return [best] if best else []
+    return verified
 
 
 def match_stubhub(
@@ -590,7 +664,7 @@ def match_stubhub(
     sh_events: list[StubHubEvent],
 ) -> list[ArbitrageOpportunity]:
     """Find the cheapest matching StubHub listing for a CrowdVolt event."""
-    best = None
+    verified = []
     fee_rate = config.PLATFORM_FEES.get("StubHub", 0)
     cv_local_date = _localize_cv_date(cv_event)
 
@@ -607,7 +681,10 @@ def match_stubhub(
         if not _venues_match(cv_event.venue, sh.venue):
             continue
         if sh.min_price is None:
-            continue
+            if not sh.listings:
+                continue
+            sh.min_price = min(row.all_in_price for row in sh.listings)
+            sh.price_is_all_in = True
 
         # Use actual all-in price when available, otherwise estimate fees
         if sh.price_is_all_in:
@@ -634,10 +711,9 @@ def match_stubhub(
         if cv_event.max_bid is not None:
             opp.profit_vs_bid = round(cv_event.max_bid - all_in, 2)
 
-        if best is None or opp.source_price < best.source_price:
-            best = opp
+        verified.extend(_tier_opportunities(opp, sh, require_identity=True))
 
-    return [best] if best else []
+    return verified
 
 
 def match_vividseats(
@@ -645,7 +721,7 @@ def match_vividseats(
     vs_events: list[VividSeatsEvent],
 ) -> list[ArbitrageOpportunity]:
     """Find the cheapest matching VividSeats listing for a CrowdVolt event."""
-    best = None
+    verified = []
     fee_rate = config.PLATFORM_FEES.get("VividSeats", 0)
     cv_local_date = _localize_cv_date(cv_event)
 
@@ -689,10 +765,9 @@ def match_vividseats(
         if cv_event.max_bid is not None:
             opp.profit_vs_bid = round(cv_event.max_bid - all_in, 2)
 
-        if best is None or opp.source_price < best.source_price:
-            best = opp
+        verified.extend(_tier_opportunities(opp, vs, require_identity=True))
 
-    return [best] if best else []
+    return verified
 
 
 def match_gametime(
@@ -700,7 +775,7 @@ def match_gametime(
     gt_events: list[GametimeEvent],
 ) -> list[ArbitrageOpportunity]:
     """Find the cheapest matching Gametime listing for a CrowdVolt event."""
-    best = None
+    verified = []
     fee_rate = config.PLATFORM_FEES.get("Gametime", 0)
     cv_local_date = _localize_cv_date(cv_event)
 
@@ -751,10 +826,9 @@ def match_gametime(
         if cv_event.max_bid is not None:
             opp.profit_vs_bid = round(cv_event.max_bid - all_in, 2)
 
-        if best is None or opp.source_price < best.source_price:
-            best = opp
+        verified.extend(_tier_opportunities(opp, gt, require_identity=True))
 
-    return [best] if best else []
+    return verified
 
 
 def match_resident_advisor(
@@ -773,7 +847,7 @@ def match_resident_advisor(
     multi-artist billing where CV tags the event by a supporting act but
     RA titles it by the headliner.
     """
-    best = None
+    verified = []
     fee_rate = config.PLATFORM_FEES.get("ResidentAdvisor", 0.15)
     cv_local_date = _localize_cv_date(cv_event)
 
@@ -821,7 +895,6 @@ def match_resident_advisor(
         if cv_event.max_bid is not None:
             opp.profit_vs_bid = round(cv_event.max_bid - all_in, 2)
 
-        if best is None or opp.source_price < best.source_price:
-            best = opp
+        verified.extend(_tier_opportunities(opp, ra, require_identity=True))
 
-    return [best] if best else []
+    return verified

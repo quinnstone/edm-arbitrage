@@ -7,14 +7,17 @@ Usage:
 """
 
 import argparse
+import json
+from pathlib import Path
 import os
 import re
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeout
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _FuturesTimeout
 from datetime import datetime
 
 import config
+from provider_runner import run_provider, PROVIDERS, TIMEOUTS
 import crowdvolt
 import gametime
 import matcher
@@ -45,7 +48,7 @@ def _run_with_timeout(fn, timeout_sec: int, label: str):
         executor.shutdown(wait=False)
 
 
-def scan_once() -> int:
+def scan_once(dry_run: bool = False) -> int:
     """Run a full scan. Returns number of opportunities found."""
     print(f"\n{'='*60}")
     print(f"[Scan] Starting at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -55,7 +58,8 @@ def scan_once() -> int:
     cv_events = crowdvolt.fetch_all_events()
     if not cv_events:
         print("[Scan] No CrowdVolt events with active listings — nothing to do")
-        notifier.send_summary(0, 0, 0, 0, 0, dice_filtered=0)
+        if not dry_run:
+            notifier.send_summary(0, 0, 0, 0, 0, dice_filtered=0)
         return 0
 
     # Filter out past events — no point scanning events that already happened
@@ -70,232 +74,90 @@ def scan_once() -> int:
     # tickets directly via fan-to-fan transfer, so it needs the broader set.
     upcoming_events = list(cv_events)
 
-    # DICE events: spec-only path, no forward arb. Operator can't reliably
-    # acquire a DICE-issued ticket on a 3P platform to fill a CV bid (tickets
-    # are wallet-bound). But the reverse — listing on 3P and sourcing from
-    # CV when sold — is workable for events where 3P listings exist. Lean
-    # scan: include DICE in the matcher loop but skip the slow StubHub
-    # scraper for those events (low hit rate, expensive). Forward arb
-    # alerts are filtered downstream.
+    # DICE remains reverse-only; both requested reverse destinations run.
     dice_events = [e for e in cv_events if e.ticket_platform.upper() == "DICE"]
-    print(f"[Scan] {len(dice_events)} DICE events kept for spec digest "
-          f"(forward arb + StubHub search skipped on those); "
-          f"{len(cv_events) - len(dice_events)} non-DICE events scanned both directions")
+    print(f"[Scan] {len(dice_events)} DICE events are reverse-only (TickPick/StubHub)")
 
     # Filter out seated venues — section-based pricing makes lowest
     # third-party price meaningless vs CrowdVolt bids for specific sections.
     # The seated_scanner module handles these via section-level matching.
     # Word-boundary matching (not exact) so venue-name variants like
     # "Huntington Bank Pavilion at Northerly Island" still get filtered.
-    SEATED_VENUES = {
-        "barclays center",
-        "madison square garden",
-        "msg",
-        "forest hills stadium",
-        "huntington bank pavilion",
-        "wrigley field",
-    }
-
-    def _is_seated_venue(venue) -> bool:
-        v = (venue or "").lower().strip()
-        if not v:
-            return False
-        return any(re.search(r"\b" + re.escape(k) + r"\b", v) for k in SEATED_VENUES)
-
-    seated = [e for e in cv_events if _is_seated_venue(e.venue)]
-    cv_events = [e for e in cv_events if not _is_seated_venue(e.venue)]
+    from venue_routing import is_seated_event
+    seated = [e for e in cv_events if is_seated_event(e)]
+    cv_events = [e for e in cv_events if not is_seated_event(e)]
     if seated:
         print(f"[Scan] Filtered out {len(seated)} seated venue events (Barclays/MSG)")
 
     # Track bid availability
-    events_with_bids = sum(1 for e in cv_events if e.max_bid is not None)
+    events_with_bids = sum(1 for e in cv_events if e.bids)
     events_with_asks_only = len(cv_events) - events_with_bids
     print(f"[Scan] {events_with_bids}/{len(cv_events)} events have waiting buyers, "
           f"{events_with_asks_only} have sellers only")
 
-    # Step 2: Only scan events with active bids against third-party platforms.
-    # No bid = no guaranteed buyer = no arbitrage opportunity.
-    bid_events = [e for e in cv_events if e.max_bid is not None]
-    print(f"[Scan] Scanning {len(bid_events)} events with active buyers against third-party platforms")
+    # Search demand for forward trades and supply for reverse candidates.
+    scan_events = [e for e in cv_events if e.bids or e.asks]
+    print(f"[Scan] Comparing {len(scan_events)} events; reverse searches use TickPick/StubHub only")
 
     all_opportunities = []
     errors = 0
     match_failures = 0
 
-    for cv_event in bid_events:
-        ask_str = f"${cv_event.min_ask:.0f}" if cv_event.min_ask else "none"
-        print(f"\n[Match] {cv_event.name} (lowest seller: {ask_str}, highest buyer: ${cv_event.max_bid:.0f})")
+    comparison_deadline = time.monotonic() + config.COMPARISON_BUDGET_SECONDS
 
-        # Generate candidate search queries — multi-artist names produce
-        # multiple queries (featured artist first, promoter second).
+    def _scan_event(cv_event):
+        opportunities, event_errors = [], 0
+        forward = bool(cv_event.bids) and cv_event.ticket_platform.upper() != "DICE"
+        requested = set(config.REVERSE_PLATFORMS) if cv_event.asks else set()
+        if forward:
+            requested.update({"SeatGeek", "TickPick", "StubHub", "VividSeats", "Gametime"})
+            if cv_event.ticket_platform.lower() == "resident advisor":
+                requested.add("ResidentAdvisor")
+        cv_event.comparison_status = {p: "not_requested" for p in PROVIDERS}
         queries = matcher.search_queries(cv_event.name)
-
-        # Use localized date for search filters so late-night ET shows
-        # don't search the wrong calendar day (CrowdVolt stores UTC).
         local_dt = matcher._localize_cv_date(cv_event)
         date_str = local_dt.strftime("%Y-%m-%d") if local_dt else None
-
-        print(f"  [Query] {queries} (from \"{cv_event.name}\") date={date_str}")
-
-        event_matched = False
-
-        # --- HTTP-based sources (fast) ---
-
-        # Search SeatGeek — try each query, break when we get a matched opportunity
-        sg_opps = []
-        for q in queries:
+        print(f"[Match] {cv_event.name}: {sorted(requested)}", flush=True)
+        for platform in PROVIDERS:
+            if platform not in requested:
+                continue
+            remaining = comparison_deadline - time.monotonic()
+            if remaining <= 0:
+                cv_event.comparison_status[platform] = "scan_budget_exhausted"
+                event_errors += 1
+                continue
             try:
-                sg_results = seatgeek.search_events(q, date_str)
-                if sg_results:
-                    sg_opps = matcher.match_seatgeek(cv_event, sg_results)
-                    if sg_opps:
-                        break  # got a real match, stop trying queries
-            except Exception as e:
-                print(f"  [SeatGeek] Error on query '{q}': {e}")
-                errors += 1
-        if sg_opps:
-            event_matched = True
-            for opp in sg_opps:
-                _log_opportunity(opp)
-            all_opportunities.extend(sg_opps)
+                opps, status, failures = run_provider(platform, cv_event, queries, date_str,
+                                                     timeout=min(TIMEOUTS[platform], remaining))
+                cv_event.comparison_status[platform] = status
+                event_errors += len(failures)
+                opportunities.extend(opps)
+                for opp in opps:
+                    _log_opportunity(opp)
+                for failure in failures:
+                    print(f"  [{platform}] {failure}", flush=True)
+            except Exception as exc:
+                # Preserve earlier successful providers when a later one fails.
+                event_errors += 1
+                cv_event.comparison_status[platform] = "error"
+                print(f"  [{platform}] {type(exc).__name__}: {exc}", flush=True)
+        return opportunities, event_errors, int(not any(o.tier_verified for o in opportunities))
 
-        # Search TickPick — try each query, break when we get a matched opportunity
-        tp_opps = []
-        for q in queries:
+    with ThreadPoolExecutor(max_workers=config.EVENT_SCAN_WORKERS) as pool:
+        futures = {pool.submit(_scan_event, ev): ev for ev in scan_events}
+        for future in as_completed(futures):
             try:
-                tp_results = tickpick.search_events(q, date_str)
-                if tp_results:
-                    tp_opps = matcher.match_tickpick(cv_event, tp_results)
-                    if tp_opps:
-                        break
-            except Exception as e:
-                print(f"  [TickPick] Error on query '{q}': {e}")
+                opps, event_errors, missing = future.result()
+                all_opportunities.extend(opps)
+                errors += event_errors
+                match_failures += missing
+            except Exception as exc:
                 errors += 1
-        if tp_opps:
-            event_matched = True
-            for opp in tp_opps:
-                _log_opportunity(opp)
-            all_opportunities.extend(tp_opps)
+                print(f"[Scan] Event comparison failed for {futures[future].slug}: {exc}")
 
-        # --- Playwright-based sources (slower, headless browser) ---
-
-        # Search StubHub — skip for DICE events: tickets are wallet-bound so
-        # StubHub almost never lists them, and the scraper is 7-12s/query.
-        # Wrapped in a hard 90s per-event timeout because StubHub uses
-        # Playwright and can silently hang in the sync API (browser process
-        # unresponsive). Losing 1 event's StubHub is better than the whole
-        # scan hanging past the workflow timeout.
-        sh_opps = []
-        if cv_event.ticket_platform.upper() != "DICE":
-            def _search_stubhub():
-                opps = []
-                for q in queries:
-                    try:
-                        results = stubhub.search_events(q, date_str)
-                        if results:
-                            matched = matcher.match_stubhub(cv_event, results)
-                            if matched:
-                                return matched
-                    except Exception as ex:
-                        print(f"  [StubHub] Error on query '{q}': {ex}", flush=True)
-                return opps
-            sh_opps = _run_with_timeout(
-                _search_stubhub,
-                timeout_sec=90,
-                label=f"StubHub for {cv_event.name}",
-            ) or []
-            if not sh_opps and not isinstance(sh_opps, list):
-                errors += 1
-        if sh_opps:
-            event_matched = True
-            for opp in sh_opps:
-                _log_opportunity(opp)
-            all_opportunities.extend(sh_opps)
-
-        # Search VividSeats — also Playwright, also anti-botted (Cloudflare
-        # challenge with 3 retry attempts internally). Same hard-timeout
-        # wrap as StubHub.
-        def _search_vividseats():
-            opps = []
-            for q in queries:
-                try:
-                    results = vividseats.search_events(q, date_str)
-                    if results:
-                        matched = matcher.match_vividseats(cv_event, results)
-                        if matched:
-                            return matched
-                except Exception as ex:
-                    print(f"  [VividSeats] Error on query '{q}': {ex}", flush=True)
-            return opps
-        vs_opps = _run_with_timeout(
-            _search_vividseats,
-            timeout_sec=60,
-            label=f"VividSeats for {cv_event.name}",
-        ) or []
-        if vs_opps:
-            event_matched = True
-            for opp in vs_opps:
-                _log_opportunity(opp)
-            all_opportunities.extend(vs_opps)
-
-        # Search Gametime — try each query, break when we get a matched opportunity
-        gt_opps = []
-        for q in queries:
-            try:
-                gt_results = gametime.search_events(q, date_str)
-                if gt_results:
-                    gt_opps = matcher.match_gametime(cv_event, gt_results)
-                    if gt_opps:
-                        break
-            except Exception as e:
-                print(f"  [Gametime] Error on query '{q}': {e}")
-                errors += 1
-        if gt_opps:
-            event_matched = True
-            for opp in gt_opps:
-                _log_opportunity(opp)
-            all_opportunities.extend(gt_opps)
-
-        # Search Resident Advisor — scoped to events where CV has already
-        # tagged RA as the primary listing platform. RA doesn't sell
-        # tickets directly for most shows (LEGACY ticketing → external
-        # vendor at checkout), but the `cost` field is a reliable base
-        # price signal that the matcher inflates with the estimated ~15%
-        # buyer fee. Availability isn't checkable without auth — the
-        # operator verifies at click-through.
-        ra_opps = []
-        if cv_event.ticket_platform.lower() == "resident advisor":
-            def _search_ra():
-                opps = []
-                for q in queries:
-                    try:
-                        results = resident_advisor.search_events(
-                            q, date_str, city_hint=cv_event.city)
-                        if results:
-                            matched = matcher.match_resident_advisor(cv_event, results)
-                            if matched:
-                                return matched
-                    except Exception as ex:
-                        print(f"  [ResidentAdvisor] Error on query '{q}': {ex}",
-                              flush=True)
-                return opps
-            ra_opps = _run_with_timeout(
-                _search_ra,
-                timeout_sec=60,
-                label=f"ResidentAdvisor for {cv_event.name}",
-            ) or []
-        if ra_opps:
-            event_matched = True
-            for opp in ra_opps:
-                _log_opportunity(opp)
-            all_opportunities.extend(ra_opps)
-
-        if not event_matched:
-            print(f"  [No Match] Could not match on any platform")
-            match_failures += 1
-
-        # Small delay between event lookups to respect rate limits
-        time.sleep(0.5)
+    coverage_path = Path(__file__).parent / "data" / "comparison_coverage.json"
+    coverage_path.parent.mkdir(exist_ok=True)
+    coverage_path.write_text(json.dumps({e.slug: e.comparison_status for e in scan_events}, indent=2))
 
     # Step 3: Filter to real opportunities and notify
     real_opps = _filter_opportunities(all_opportunities)
@@ -305,7 +167,7 @@ def scan_once() -> int:
     dice_in_forward = len(real_opps) - len(forward_opps)
     print(f"\n[Scan] {len(forward_opps)} forward-arb opportunities passed filters "
           f"({dice_in_forward} DICE excluded — spec only)")
-    print(f"[Scan] {match_failures} events had no cross-platform match")
+    print(f"[Scan] {match_failures} events had no verified product comparison")
 
     # Group opportunities by CrowdVolt event so we send one alert per event
     by_event: dict[str, list] = {}
@@ -313,8 +175,10 @@ def scan_once() -> int:
         slug = opp.crowdvolt_event.slug
         by_event.setdefault(slug, []).append(opp)
 
+    sent_events = 0
     for slug, opps in by_event.items():
-        notifier.send_alert(opps)
+        if not dry_run and notifier.send_alert(opps):
+            sent_events += 1
         time.sleep(1)  # respect Discord rate limits
 
     # Step 3b (removed): the Reddit Tix scanner against r/avesNYC_tix has
@@ -323,66 +187,73 @@ def scan_once() -> int:
     # (reddit_tix_scanner.py) is left in place but no longer called from
     # the main scan. To revive, restore the try/except block here.
 
-    # Step 3c: Marquee Skydeck face-value arb — flag CV buyer offers that
-    # exceed Tao primary face value when the primary isn't sold out (buy
-    # at face, fill the bid). Makes zero Tao requests unless a bidded
-    # Skydeck event exists. Wrapped with hard timeout — a hung Tao HTTP
-    # call was suspected as the post-matcher hang cause.
-    try:
-        import skydeck_scanner
-        # 90s — discovery is now parallel (5-worker ThreadPoolExecutor,
-        # ~15s for 50 slots down from ~140s serial). Non-discovery scans
-        # complete in <10s. 90s gives 4-5x headroom for Tao slowness or
-        # transient 502s without wasting scan budget.
-        _run_with_timeout(
-            lambda: skydeck_scanner.scan(cv_events=upcoming_events),
-            timeout_sec=90,
-            label="Skydeck scan",
-        )
-    except Exception as e:
-        print(f"[Skydeck] Inline scan failed (main scan continues): {e}", flush=True)
+    if not dry_run:
+        # Step 3c: Marquee Skydeck face-value arb — flag CV buyer offers that
+        # exceed Tao primary face value when the primary isn't sold out (buy
+        # at face, fill the bid). Makes zero Tao requests unless a bidded
+        # Skydeck event exists. Wrapped with hard timeout — a hung Tao HTTP
+        # call was suspected as the post-matcher hang cause.
+        try:
+            import skydeck_scanner
+            # 90s — discovery is now parallel (5-worker ThreadPoolExecutor,
+            # ~15s for 50 slots down from ~140s serial). Non-discovery scans
+            # complete in <10s. 90s gives 4-5x headroom for Tao slowness or
+            # transient 502s without wasting scan budget.
+            _run_with_timeout(
+                lambda: skydeck_scanner.scan(cv_events=upcoming_events),
+                timeout_sec=90,
+                label="Skydeck scan",
+            )
+        except Exception as e:
+            print(f"[Skydeck] Inline scan failed (main scan continues): {e}", flush=True)
 
-    # Step 3d: Open-position risk monitor — watches naked spec listings
-    # recorded in positions.json and alerts when CV's cheapest ask erodes
-    # the after-fee payout (thin < $5 margin / underwater / no supply).
-    # Problem-alerts only; wrapped in hard timeout for the same reason as
-    # Skydeck.
-    try:
-        import position_monitor
-        _run_with_timeout(
-            lambda: position_monitor.scan(cv_events=upcoming_events),
-            timeout_sec=60,
-            label="Position monitor",
-        )
-    except Exception as e:
-        print(f"[Positions] Inline monitor failed (main scan continues): {e}", flush=True)
+        # Step 3d: Open-position risk monitor — watches naked spec listings
+        # recorded in positions.json and alerts when CV's cheapest ask erodes
+        # the after-fee payout (thin < $5 margin / underwater / no supply).
+        # Problem-alerts only; wrapped in hard timeout for the same reason as
+        # Skydeck.
+        try:
+            import position_monitor
+            _run_with_timeout(
+                lambda: position_monitor.scan(cv_events=upcoming_events),
+                timeout_sec=60,
+                label="Position monitor",
+            )
+        except Exception as e:
+            print(f"[Positions] Inline monitor failed (main scan continues): {e}", flush=True)
 
     # Step 4: Track bid/ask snapshots and evaluate speculative opportunities.
-    undercut.save_bid_snapshot(cv_events)
-    undercut.update_listing_persistence(cv_events)
+    if not dry_run:
+        undercut.save_bid_snapshot(cv_events)
+        undercut.update_listing_persistence(cv_events)
 
     # Step 5: Evaluate speculative listing opportunities.
     # List on 3P platform at market price → source from CrowdVolt when sold.
-    spec_opps = undercut.find_opportunities(all_opportunities, bid_events)
+    spec_opps = undercut.find_opportunities(all_opportunities, scan_events)
     spec_sent = 0
     if spec_opps:
         print(f"[Scan] {len(spec_opps)} speculative listing opportunities detected")
-        spec_sent = undercut.send_alerts(spec_opps)
+        if not dry_run:
+            spec_sent = undercut.send_alerts(spec_opps)
 
-    # Step 6: Log full scan results for backtesting (includes alert outcomes).
+    # Step 6: Log comparisons and speculative candidates for backtesting.
     undercut.log_scan_results(
-        bid_events, all_opportunities,
+        scan_events, all_opportunities,
         arb_count=len(by_event), spec_opps=spec_opps,
     )
 
-    notifier.send_summary(
-        len(cv_events), len(by_event), errors,
-        events_with_bids, match_failures,
-        dice_filtered=len(dice_events),
-        undercut_sent=spec_sent,
-    )
+    if not dry_run:
+        notifier.send_summary(
+            len(cv_events), sent_events, errors,
+            events_with_bids, match_failures,
+            dice_filtered=len(dice_events),
+            undercut_sent=spec_sent,
+            compared_events=len(scan_events),
+            tier_unavailable=sum(status == "tier_metadata_unavailable"
+                                 for ev in scan_events for status in ev.comparison_status.values()),
+        )
 
-    print(f"[Scan] Done — {len(by_event)} arb alerts, {spec_sent} speculative alerts")
+    print(f"[Scan] Done — {len(by_event)} arb candidates, {sent_events} arb alerts delivered, {spec_sent} speculative alerts")
     return len(by_event)
 
 
@@ -407,11 +278,12 @@ def _filter_opportunities(opps: list) -> list:
     at a price higher than what you'd pay on the source platform.
     No bid = no guaranteed buyer = no alert.
     """
+    from ticket_products import positive_price
     filtered = []
 
     for opp in opps:
         # ONLY alert when there is an active bid we can profit from
-        if opp.profit_vs_bid is not None and opp.profit_vs_bid > 0:
+        if opp.tier_verified and positive_price(opp.source_price) and positive_price(opp.profit_vs_bid):
             margin = (opp.profit_vs_bid / opp.source_price) * 100
             if margin >= config.MIN_PROFIT_MARGIN_PCT:
                 filtered.append(opp)
@@ -497,31 +369,34 @@ def test_single():
 
 def main():
     parser = argparse.ArgumentParser(description="Ticket arbitrage scanner")
+    parser.add_argument("--dry", action="store_true", help="Compare and log without alerts or auxiliary scans")
     parser.add_argument("--loop", action="store_true", help="Run continuously on a schedule")
     parser.add_argument("--test", action="store_true", help="Test with a single event")
     args = parser.parse_args()
 
     # TickPick requires no API key, so we can always run.
     # SeatGeek is an optional addition. StubHub/VividSeats use Playwright.
-    if not config.DISCORD_WEBHOOK_URL:
+    if not config.DISCORD_WEBHOOK_URL and not args.dry:
         print("ERROR: Set DISCORD_WEBHOOK_URL")
         sys.exit(1)
 
     if args.test:
+        if args.dry:
+            parser.error("--test sends test notifications; use --dry without --test")
         test_single()
     elif args.loop:
         print(f"[Loop] Running every {config.SCAN_INTERVAL_MINUTES} minutes")
         print("[Loop] Press Ctrl+C to stop\n")
         while True:
             try:
-                scan_once()
+                scan_once(dry_run=args.dry)
                 print(f"\n[Loop] Next scan in {config.SCAN_INTERVAL_MINUTES} minutes...")
                 time.sleep(config.SCAN_INTERVAL_MINUTES * 60)
             except KeyboardInterrupt:
                 print("\n[Loop] Stopped")
                 break
     else:
-        scan_once()
+        scan_once(dry_run=args.dry)
         # Force process exit. Playwright browser processes launched via
         # ThreadPoolExecutor worker threads leave non-daemon threads alive
         # for 18+ minutes after the scan completes, keeping Python running

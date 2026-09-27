@@ -145,6 +145,7 @@ class SectionListing:
     row: str
     price: float        # all-in price (TickPick has no buyer fees)
     qty: int
+    notes: str = ""
 
 
 @dataclass
@@ -324,11 +325,16 @@ def fetch_section_listings(event_url: str) -> list[SectionListing]:
     raw_listings = api_data[0].get("listings", [])
     listings = []
 
+    from listing_metadata import parse_tickpick
     for item in raw_listings:
+        parsed = parse_tickpick({'listings': [item]})
+        if not parsed:
+            continue
+        source = parsed[0]
         sid = str(item.get("sid", ""))
         row = str(item.get("r", ""))
-        price = item.get("p")
-        qty = item.get("q", 1)
+        price = source.all_in_price
+        qty = source.qty
 
         if not sid or price is None:
             continue
@@ -350,6 +356,7 @@ def fetch_section_listings(event_url: str) -> list[SectionListing]:
             row=row,
             price=float(price),
             qty=int(qty),
+            notes=source.notes,
         ))
 
     return listings
@@ -366,22 +373,19 @@ def find_section_arbitrage(
 ) -> list[SeatedOpportunity]:
     """Compare CrowdVolt bids against TickPick listings, section by section."""
 
-    # Cheapest TickPick listing per normalized section
-    tp_cheapest: dict[str, SectionListing] = {}
-    for listing in tp_listings:
-        key = listing.section_norm
-        if key not in tp_cheapest or listing.price < tp_cheapest[key].price:
-            tp_cheapest[key] = listing
-
+    from ticket_products import is_admission, positive_price, row_restrictions
     opportunities = []
-
     for bid in cv_event.bids:
-        bid_section = normalize_section(bid.ticket_type)
-
-        if bid_section not in tp_cheapest:
+        if not bid.price_verified or bid.qty <= 0 or not positive_price(bid.all_in_price) or not is_admission(bid.ticket_type):
             continue
-
-        tp = tp_cheapest[bid_section]
+        bid_section = normalize_section(bid.ticket_type)
+        candidates = [tp for tp in tp_listings
+            if tp.section_norm == bid_section and is_admission(tp.section)
+            and 0 < tp.qty == bid.qty and positive_price(tp.price) and not tp.notes
+            and not row_restrictions(tp.row)]
+        if not candidates:
+            continue
+        tp = min(candidates, key=lambda listing: listing.price)
         profit = bid.all_in_price - tp.price
 
         if profit <= 0:
@@ -733,23 +737,9 @@ def scan_once(dry_run: bool = False) -> int:
     print(f"[Seated] Starting at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*60}")
 
-    # Fetch only seated-venue events from the sitemap — no need to crawl
-    # all 600+ CrowdVolt pages when we only care about ~10 slugs.
-    print("[Seated] Fetching CrowdVolt sitemap...")
-    slugs = crowdvolt.fetch_sitemap()
-    seated_slugs = [
-        s for s in slugs
-        if any(k in s.lower() for k in _SEATED_SLUG_KEYWORDS)
-    ]
-    print(f"[Seated] {len(seated_slugs)} seated venue slugs found")
-
-    # Fetch each event individually
-    seated_events = []
-    for slug in seated_slugs:
-        event = crowdvolt.fetch_event(slug)
-        if event:
-            seated_events.append(event)
-        time.sleep(0.3)
+    from venue_routing import is_seated_event
+    seated_events = [e for e in crowdvolt.fetch_all_events() if is_seated_event(e)]
+    print(f"[Seated] {len(seated_events)} events routed by venue/tier metadata")
 
     # Filter to future events
     today = datetime.now().date()
@@ -794,7 +784,7 @@ def scan_once(dry_run: bool = False) -> int:
         for bid in cv_event.bids:
             print(f"  Bid: [{bid.ticket_type}] ${bid.all_in_price:.0f} x{bid.qty}")
         if cv_event.asks:
-            print(f"  Asks: {len(cv_event.asks)} sellers (min ${cv_event.min_ask:.0f})")
+            print(f"  Asks: {len(cv_event.asks)} sellers (GA minimum: {cv_event.min_ask})")
 
         # Find matching TickPick event
         try:

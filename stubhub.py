@@ -9,7 +9,7 @@ so we navigate to each candidate event page to extract pricing from JSON-LD.
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -29,6 +29,7 @@ class StubHubEvent:
     min_price: Optional[float]
     url: str
     price_is_all_in: bool = False  # True when price includes fees
+    listings: list = field(default_factory=list)
 
 
 def search_events(query: str, date_str: Optional[str] = None) -> list[StubHubEvent]:
@@ -121,7 +122,7 @@ def search_events(query: str, date_str: Optional[str] = None) -> list[StubHubEve
                             viewport={"width": 1280, "height": 800},
                         )
                         try:
-                            result = _fetch_event_price(event_page, candidate.url)
+                            result = _fetch_event_price(event_page, candidate.url, candidate.listings)
                         finally:
                             event_page.close()
                         if result is not None:
@@ -224,7 +225,7 @@ def _parse_search_cards(page) -> list[StubHubEvent]:
     return candidates
 
 
-def _fetch_event_price(page, event_url: str) -> Optional[tuple[float, bool]]:
+def _fetch_event_price(page, event_url: str, listings=None) -> Optional[tuple[float, bool]]:
     """Navigate to a StubHub event page and extract the true all-in price.
 
     Only accepts prices from the visible "$X incl. fees" text — which
@@ -236,6 +237,23 @@ def _fetch_event_price(page, event_url: str) -> Optional[tuple[float, bool]]:
     1.87x respectively, way beyond any fee-rate error). Returning None
     on miss is safer than emitting an alert with a phantom price.
     """
+    from listing_metadata import parse_stubhub
+    event_id_match = re.search(r'/event/(\d+)', event_url)
+    event_id = event_id_match.group(1) if event_id_match else None
+    def on_response(response):
+        if listings is None or response.status != 200:
+            return
+        if 'json' not in response.headers.get('content-type', ''):
+            return
+        # Exclude recommendations and unrelated JSON responses on the page.
+        request_context = response.url + ' ' + (response.request.post_data or '')
+        if not event_id or not re.search(r'(?<!\d)' + re.escape(event_id) + r'(?!\d)', request_context):
+            return
+        try:
+            listings.extend(parse_stubhub(response.json()))
+        except Exception:
+            pass
+    page.on('response', on_response)
     try:
         page.goto(event_url, wait_until="domcontentloaded", timeout=15000)
         page.wait_for_timeout(2000)  # brief pause for React app initialization
@@ -254,12 +272,14 @@ def _fetch_event_price(page, event_url: str) -> Optional[tuple[float, bool]]:
         # after the initial paint.
         try:
             page.wait_for_function(
-                "() => document.body.innerText.includes('incl. fees')",
+                "() => document.body && document.body.innerText.includes('incl. fees')",
                 timeout=8000,
             )
         except PwTimeout:
             pass
 
+        if listings:
+            return min(row.all_in_price for row in listings), True
         body = page.inner_text("body")
         match = re.search(r'\$(\d+(?:,\d{3})*)\s*incl\.\s*fees', body)
         if match:

@@ -69,3 +69,14 @@ PLATFORM_FEES = {
 # Request settings
 REQUEST_TIMEOUT = 15
 REQUEST_DELAY_SECONDS = 1.5  # delay between CrowdVolt page fetches to be polite
+
+# Reverse candidates: only these destination markets are searched.
+REVERSE_PLATFORMS = frozenset({"TickPick", "StubHub"})
+# Retain the existing supply cushion, now measured within the same tier/lot.
+SPEC_MIN_MATCHING_ASKS = 3
+# Bounded event parallelism keeps the expanded sellers-only scan practical.
+EVENT_SCAN_WORKERS = 4
+
+# Leave time for alerts/state persistence inside the 45-minute workflow.
+# Exhaustion is recorded per provider instead of killing the whole scan.
+COMPARISON_BUDGET_SECONDS = 30 * 60

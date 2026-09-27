@@ -52,6 +52,8 @@ class GametimeListing:
     prefee: float
     total: float
     delivery_type: str
+    allowed_quantities: tuple = ()
+    notes: str = ""
 
 
 @dataclass
@@ -234,23 +236,34 @@ def fetch_listings(event_id: str, retries: int = 2) -> list[GametimeListing]:
     except ValueError:
         return []
 
+    from ticket_products import positive_price, positive_quantity, restriction_notes
     listings = []
     for item in payload.get("listings", []):
-        price = item.get("price") or {}
-        total_cents = price.get("total")
-        if total_cents is None:
+        try:
+            price = item.get("price") or {}
+            total = float(price.get("total", 0)) / 100
+            if not positive_price(total):
+                continue
+            lots = tuple(positive_quantity(q) for q in item.get("lots", []))
+            if not lots:
+                continue
+            # The live API prices a particular requested lot. Do not assign
+            # that price to other splits without querying those quantities.
+            priced_lot = item.get("priced_from_lot")
+            quantities = (positive_quantity(priced_lot),) if priced_lot is not None else ()
+            if not quantities or quantities[0] not in lots:
+                continue
+            spot = item.get("spot") or {}
+            notes = restriction_notes(item.get("disclosures"), spot.get("disclosures"))
+            listings.append(GametimeListing(
+                listing_id=item.get("id", ""), section=item.get("section", ""),
+                row=item.get("row", ""), qty=max(lots),
+                face_value=(price.get("face_value") or 0) / 100,
+                prefee=(price.get("prefee") or 0) / 100, total=total,
+                delivery_type=item.get("delivery_type", ""),
+                allowed_quantities=quantities, notes=notes))
+        except (ValueError, TypeError, OverflowError):
             continue
-        lots = item.get("lots") or [1]
-        listings.append(GametimeListing(
-            listing_id=item.get("id", ""),
-            section=item.get("section", ""),
-            row=item.get("row", ""),
-            qty=len(lots) if isinstance(lots, list) else 1,
-            face_value=(price.get("face_value") or 0) / 100,
-            prefee=(price.get("prefee") or 0) / 100,
-            total=total_cents / 100,
-            delivery_type=item.get("delivery_type", ""),
-        ))
     return listings
 
 
