@@ -22,7 +22,7 @@ test('update freezes legacy ID as well as new IDs',()=>{
  const d={positions:[{event:'Legacy',event_date:'2099-01-01',platform:'TickPick',listed_price:89,status:'open'}]};
  const id=positionId(d.positions[0]);applyCommand(d,'update',{position:id,net_payout:'88.75'},'1');assert.equal(positionId(d.positions[0]),id);assert.equal(d.positions[0].listed_price,88.75);
 });
-test('closed correction stays closed and implicit reopen is rejected',()=>{const d=doc();applyCommand(d,'add',args,'1');const id=positionId(d.positions[0]);applyCommand(d,'stop',{position:id},'2');applyCommand(d,'update',{position:id,net_payout:90},'3');assert.equal(d.positions[0].status,'closed');assert.throws(()=>applyCommand(d,'add',args,'4'));});
+test('closed update and implicit reopen rejected',()=>{const d=doc();applyCommand(d,'add',args,'1');const id=positionId(d.positions[0]);applyCommand(d,'stop',{position:id},'2');assert.throws(()=>applyCommand(d,'update',{position:id,net_payout:90},'3'));assert.throws(()=>applyCommand(d,'add',args,'4'));});
 test('bad dates, amounts, platforms rejected',()=>{
  for(const delta of [{date:'2099-02-30'},{date:'01/02/2099'},{date:'2000-01-01'},{net_payout:'NaN'},{net_payout:'Infinity'},{net_payout:'-5'},{net_payout:'0'},{net_payout:'1.001'},{net_payout:true},{platform:'VividSeats'},{platform:'Gametime'},{event:''},{venue:''}]) assert.throws(()=>applyCommand(doc(),'add',{...args,...delta},'1'),JSON.stringify(delta));
 });
@@ -52,7 +52,7 @@ test('defer is immediate; completion catches storage failure',async()=>{
  const p={type:2,id:'123',token:'fake',guild_id:'guild',channel_id:'channel',member:{user:{id:'owner'}},data:{name:'position',options:[{name:'list'}]}};
  const r=await worker.fetch(request(p),env,{waitUntil:t=>task=t});assert.equal((await r.json()).type,5);await task;
 });
-test('registered commands limited to requested operations/platforms',()=>{assert.deepEqual(command.options.map(x=>x.name),['add','stop','update','resume','list']);assert.deepEqual(command.options[0].options.find(x=>x.name==='platform').choices.map(x=>x.value),['StubHub','TickPick']);});
+test('registered commands limited to requested operations/platforms',()=>{assert.deepEqual(command.options.map(x=>x.name),['add','stop','update','list']);assert.deepEqual(command.options[0].options.find(x=>x.name==='platform').choices.map(x=>x.value),['StubHub','TickPick']);});
 test('wrong server and channel are rejected even for owner',async()=>{
  globalThis.fetch=()=>{throw Error('unexpected network');};
  for(const change of [{guild_id:'wrong'},{channel_id:'wrong'}]){
@@ -69,83 +69,4 @@ test('slow storage does not delay Discord acknowledgment',async()=>{
  assert.equal((await r.json()).type,5);
  release(Response.json({sha:'x',content:Buffer.from(JSON.stringify(doc())).toString('base64')}));
  await task;
-});
-test('stopped venue correction resumes with original ID and new assessment revision',()=>{
- const d=doc();applyCommand(d,'add',{...args,venue:'Wrong Venue'},'1');const id=positionId(d.positions[0]);
- applyCommand(d,'stop',{position:id},'2');
- const stoppedRevision=d.positions[0].monitor_revision;
- applyCommand(d,'update',{position:id,venue:args.venue},'3');
- assert.equal(d.positions[0].status,'closed');assert.equal(positionId(d.positions[0]),id);
- applyCommand(d,'resume',{position:id},'4');
- assert.equal(d.positions[0].status,'open');assert.equal(positionId(d.positions[0]),id);
- assert.equal(d.positions[0].venue,args.venue);assert.ok(d.positions[0].monitor_revision>stoppedRevision);
-});
-test('resume replays and repeated commands do not repeatedly reset cooldown',()=>{
- const d=doc();applyCommand(d,'add',args,'1');const id=positionId(d.positions[0]);applyCommand(d,'stop',{position:id},'2');
- applyCommand(d,'resume',{position:id},'3');const revision=d.positions[0].monitor_revision;
- applyCommand(d,'resume',{position:id},'3');applyCommand(d,'resume',{position:id},'4');
- assert.equal(d.positions[0].monitor_revision,revision);
-});
-test('resume cannot create duplicate active position or reopen a sold/past one',()=>{
- const d=doc();applyCommand(d,'add',args,'1');const id=positionId(d.positions[0]);applyCommand(d,'stop',{position:id},'2');
- applyCommand(d,'add',{...args,net_payout:'130'},'3');
- assert.throws(()=>applyCommand(d,'resume',{position:id},'4'),/already open/);
- assert.equal(d.positions[0].status,'closed');
- const old={...d.positions[0],status:'sold'};
- assert.throws(()=>applyCommand({positions:[old]},'resume',{position:id},'5'),/Sold/);
- const past={...old,status:'closed',event_date:'2000-01-01'};
- assert.throws(()=>applyCommand({positions:[past]},'resume',{position:id},'6'),/past/);
-});
-test('correction validates before mutation and rejects duplicate or empty edits',()=>{
- const d=doc();applyCommand(d,'add',args,'1');const id=positionId(d.positions[0]);
- const original=JSON.stringify(d);
- assert.throws(()=>applyCommand(d,'update',{position:id,event:'New title',net_payout:'NaN'},'2'));
- assert.equal(JSON.stringify(d),original);
- assert.throws(()=>applyCommand(d,'update',{position:id},'3'));
- applyCommand(d,'add',{...args,event:'Another Artist'},'4');
- assert.throws(()=>applyCommand(d,'update',{position:id,event:'Another Artist'},'5'),/already open/);
- assert.equal(d.positions[0].event,args.event);
-});
-test('event and date corrections preserve ID and identical update preserves revision',()=>{
- const d=doc();applyCommand(d,'add',args,'1');const id=positionId(d.positions[0]);
- applyCommand(d,'update',{position:id,event:'Correct Artist',date:'2099-08-09',net_payout:'123.45'},'2');
- assert.equal(positionId(d.positions[0]),id);assert.equal(d.positions[0].event_date,'2099-08-09');
- const revision=d.positions[0].monitor_revision;
- applyCommand(d,'update',{position:id,event:'Correct Artist',date:'2099-08-09',net_payout:'123.45'},'3');
- assert.equal(d.positions[0].monitor_revision,revision);
-});
-test('long lists expose every full ID within Discord message limits',()=>{
- const d=doc();
- for(let i=0;i<20;i++)applyCommand(d,'add',{...args,event:`Artist ${i} `+'Long Festival Name '.repeat(9),venue:'Venue '.repeat(30)},String(i));
- const snapshot=JSON.stringify(d);const ids=[];
- for(let page=1;;page++){
-  const message=applyCommand(d,'list',{page},'read').message;
-  assert.ok(message.length<=1950,message.length);
-  ids.push(...Array.from(message.matchAll(/`([^`]+)`/g),m=>m[1]));
-  const total=Number(message.match(/page \d+\/(\d+)/)[1]);
-  if(page===total)break;
-  assert.match(message,new RegExp(`page:${page+1}`));
- }
- assert.deepEqual(ids,d.positions.map(positionId));assert.equal(JSON.stringify(d),snapshot);
-});
-test('closed/all lists allow finding stopped IDs; empty and invalid pages are explicit',()=>{
- const d=doc();applyCommand(d,'add',args,'1');const id=positionId(d.positions[0]);applyCommand(d,'stop',{position:id},'2');
- assert.ok(applyCommand(d,'list',{status:'closed'},'3').message.includes(id));
- assert.ok(applyCommand(d,'list',{status:'all'},'4').message.includes(id));
- assert.ok(!applyCommand(d,'list',{},'5').message.includes(id));
- for(const page of [0,-1,1.5,'2',NaN,2])assert.throws(()=>applyCommand(d,'list',{page},'6'));
- assert.throws(()=>applyCommand(d,'list',{status:'unknown'},'7'));
-});
-test('full signed list request returns paginated content without truncation',async()=>{
- const d=doc();for(let i=0;i<10;i++)applyCommand(d,'add',{...args,event:`Artist ${i} `+'Long Name '.repeat(16)},String(i));
- let task,reply;
- globalThis.fetch=async(_url,init)=>{
-  if(init.method==='PATCH'){reply=JSON.parse(init.body);return Response.json({});}
-  assert.notEqual(init.method,'PUT');
-  return Response.json({sha:'x',content:Buffer.from(JSON.stringify(d)).toString('base64')});
- };
- const payload={type:2,id:'list-page',token:'fake',guild_id:'guild',channel_id:'channel',member:{user:{id:'owner'}},data:{name:'position',options:[{name:'list',options:[{name:'page',value:2},{name:'status',value:'all'}]}]}};
- const r=await worker.fetch(request(payload),{...env,GITHUB_REPO:'o/r',GITHUB_TOKEN:'fake'},{waitUntil:t=>task=t});
- assert.equal((await r.json()).type,5);await task;
- assert.match(reply.content,/page 2\//);assert.ok(reply.content.length<=1950);assert.doesNotMatch(reply.content,/truncated/);
 });

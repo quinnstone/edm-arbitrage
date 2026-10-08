@@ -267,12 +267,6 @@ def scan(cv_events: list, dry_run: bool = False) -> list:
         pid = _position_id(p)
         cv = _resolve(p, cv_events)
         entry = state.get(pid, {})
-        revision = p.get("monitor_revision", 0)
-        if entry.get("monitor_revision", 0) != revision:
-            # Corrections/resume retain the ID but invalidate old severity,
-            # cooldown and unresolved misses. Legacy rows use revision zero.
-            entry = {"monitor_revision": revision}
-            state[pid] = entry
 
         # Transient-miss guard for resolution: the CV catalog scrape
         # occasionally drops 1-3 pages, so require consecutive misses
@@ -311,7 +305,7 @@ def scan(cv_events: list, dry_run: bool = False) -> list:
                 sent = _send_alert(p, cv, result)
             if sent:
                 alerts_sent.append((p, result))
-                state[pid] = {"severity": severity, "monitor_revision": revision,
+                state[pid] = {"severity": severity,
                               "last_alert": datetime.now().isoformat()}
         else:
             state[pid] = {**state.get(pid, {}), "severity": severity}
