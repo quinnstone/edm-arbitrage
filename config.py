@@ -69,3 +69,6 @@ PLATFORM_FEES = {
 # Request settings
 REQUEST_TIMEOUT = 15
 REQUEST_DELAY_SECONDS = 1.5  # delay between CrowdVolt page fetches to be polite
+
+# Destinations for speculative listings (buy on CrowdVolt to fulfill).
+SPEC_PLATFORMS = frozenset({"TickPick", "StubHub"})

@@ -513,7 +513,7 @@ def find_opportunities(
             # Resident Advisor (a listing directory pointing to external
             # primaries — we can't sell there) and any future platforms
             # not in the seller-fee table.
-            if platform not in SELLER_FEES:
+            if platform not in config.SPEC_PLATFORMS or platform not in SELLER_FEES:
                 continue
 
             seller_fee = SELLER_FEES[platform]
@@ -638,7 +638,8 @@ def send_alerts(opportunities: list[SpeculativeOpportunity]) -> int:
         return 0
 
     fresh = [o for o in opportunities
-             if not _was_recently_alerted(o.crowdvolt_event.slug)]
+             if o.sell_platform in config.SPEC_PLATFORMS
+             and not _was_recently_alerted(o.crowdvolt_event.slug)]
     if not fresh:
         return 0
 

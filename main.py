@@ -70,17 +70,10 @@ def scan_once() -> int:
     # tickets directly via fan-to-fan transfer, so it needs the broader set.
     upcoming_events = list(cv_events)
 
-    # DICE events: spec-only path, no forward arb. Operator can't reliably
-    # acquire a DICE-issued ticket on a 3P platform to fill a CV bid (tickets
-    # are wallet-bound). But the reverse — listing on 3P and sourcing from
-    # CV when sold — is workable for events where 3P listings exist. Lean
-    # scan: include DICE in the matcher loop but skip the slow StubHub
-    # scraper for those events (low hit rate, expensive). Forward arb
-    # alerts are filtered downstream.
+    # DICE is speculative-only: query only the supported listing destinations.
     dice_events = [e for e in cv_events if e.ticket_platform.upper() == "DICE"]
-    print(f"[Scan] {len(dice_events)} DICE events kept for spec digest "
-          f"(forward arb + StubHub search skipped on those); "
-          f"{len(cv_events) - len(dice_events)} non-DICE events scanned both directions")
+    print(f"[Scan] {len(dice_events)} DICE events scanned on TickPick/StubHub for spec only; "
+          f"{len(cv_events) - len(dice_events)} non-DICE events retain forward sources")
 
     # Filter out seated venues — section-based pricing makes lowest
     # third-party price meaningless vs CrowdVolt bids for specific sections.
@@ -138,26 +131,28 @@ def scan_once() -> int:
         print(f"  [Query] {queries} (from \"{cv_event.name}\") date={date_str}")
 
         event_matched = False
+        forward_enabled = cv_event.ticket_platform.upper() != "DICE"
 
         # --- HTTP-based sources (fast) ---
 
-        # Search SeatGeek — try each query, break when we get a matched opportunity
-        sg_opps = []
-        for q in queries:
-            try:
-                sg_results = seatgeek.search_events(q, date_str)
-                if sg_results:
-                    sg_opps = matcher.match_seatgeek(cv_event, sg_results)
-                    if sg_opps:
-                        break  # got a real match, stop trying queries
-            except Exception as e:
-                print(f"  [SeatGeek] Error on query '{q}': {e}")
-                errors += 1
-        if sg_opps:
-            event_matched = True
-            for opp in sg_opps:
-                _log_opportunity(opp)
-            all_opportunities.extend(sg_opps)
+        if forward_enabled:
+            # Search SeatGeek — try each query, break when we get a matched opportunity
+            sg_opps = []
+            for q in queries:
+                try:
+                    sg_results = seatgeek.search_events(q, date_str)
+                    if sg_results:
+                        sg_opps = matcher.match_seatgeek(cv_event, sg_results)
+                        if sg_opps:
+                            break  # got a real match, stop trying queries
+                except Exception as e:
+                    print(f"  [SeatGeek] Error on query '{q}': {e}")
+                    errors += 1
+            if sg_opps:
+                event_matched = True
+                for opp in sg_opps:
+                    _log_opportunity(opp)
+                all_opportunities.extend(sg_opps)
 
         # Search TickPick — try each query, break when we get a matched opportunity
         tp_opps = []
@@ -179,14 +174,10 @@ def scan_once() -> int:
 
         # --- Playwright-based sources (slower, headless browser) ---
 
-        # Search StubHub — skip for DICE events: tickets are wallet-bound so
-        # StubHub almost never lists them, and the scraper is 7-12s/query.
-        # Wrapped in a hard 90s per-event timeout because StubHub uses
-        # Playwright and can silently hang in the sync API (browser process
-        # unresponsive). Losing 1 event's StubHub is better than the whole
-        # scan hanging past the workflow timeout.
+        # StubHub supports speculative comparisons, including DICE. Forward
+        # DICE alerts remain excluded downstream. Keep the existing 90s bound.
         sh_opps = []
-        if cv_event.ticket_platform.upper() != "DICE":
+        if forward_enabled or "StubHub" in config.SPEC_PLATFORMS:
             def _search_stubhub():
                 opps = []
                 for q in queries:
@@ -212,49 +203,50 @@ def scan_once() -> int:
                 _log_opportunity(opp)
             all_opportunities.extend(sh_opps)
 
-        # Search VividSeats — also Playwright, also anti-botted (Cloudflare
-        # challenge with 3 retry attempts internally). Same hard-timeout
-        # wrap as StubHub.
-        def _search_vividseats():
-            opps = []
+        if forward_enabled:
+            # Search VividSeats — also Playwright, also anti-botted (Cloudflare
+            # challenge with 3 retry attempts internally). Same hard-timeout
+            # wrap as StubHub.
+            def _search_vividseats():
+                opps = []
+                for q in queries:
+                    try:
+                        results = vividseats.search_events(q, date_str)
+                        if results:
+                            matched = matcher.match_vividseats(cv_event, results)
+                            if matched:
+                                return matched
+                    except Exception as ex:
+                        print(f"  [VividSeats] Error on query '{q}': {ex}", flush=True)
+                return opps
+            vs_opps = _run_with_timeout(
+                _search_vividseats,
+                timeout_sec=60,
+                label=f"VividSeats for {cv_event.name}",
+            ) or []
+            if vs_opps:
+                event_matched = True
+                for opp in vs_opps:
+                    _log_opportunity(opp)
+                all_opportunities.extend(vs_opps)
+
+            # Search Gametime — try each query, break when we get a matched opportunity
+            gt_opps = []
             for q in queries:
                 try:
-                    results = vividseats.search_events(q, date_str)
-                    if results:
-                        matched = matcher.match_vividseats(cv_event, results)
-                        if matched:
-                            return matched
-                except Exception as ex:
-                    print(f"  [VividSeats] Error on query '{q}': {ex}", flush=True)
-            return opps
-        vs_opps = _run_with_timeout(
-            _search_vividseats,
-            timeout_sec=60,
-            label=f"VividSeats for {cv_event.name}",
-        ) or []
-        if vs_opps:
-            event_matched = True
-            for opp in vs_opps:
-                _log_opportunity(opp)
-            all_opportunities.extend(vs_opps)
-
-        # Search Gametime — try each query, break when we get a matched opportunity
-        gt_opps = []
-        for q in queries:
-            try:
-                gt_results = gametime.search_events(q, date_str)
-                if gt_results:
-                    gt_opps = matcher.match_gametime(cv_event, gt_results)
-                    if gt_opps:
-                        break
-            except Exception as e:
-                print(f"  [Gametime] Error on query '{q}': {e}")
-                errors += 1
-        if gt_opps:
-            event_matched = True
-            for opp in gt_opps:
-                _log_opportunity(opp)
-            all_opportunities.extend(gt_opps)
+                    gt_results = gametime.search_events(q, date_str)
+                    if gt_results:
+                        gt_opps = matcher.match_gametime(cv_event, gt_results)
+                        if gt_opps:
+                            break
+                except Exception as e:
+                    print(f"  [Gametime] Error on query '{q}': {e}")
+                    errors += 1
+            if gt_opps:
+                event_matched = True
+                for opp in gt_opps:
+                    _log_opportunity(opp)
+                all_opportunities.extend(gt_opps)
 
         # Search Resident Advisor — scoped to events where CV has already
         # tagged RA as the primary listing platform. RA doesn't sell

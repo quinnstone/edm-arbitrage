@@ -20,7 +20,7 @@
       "event_date": "2026-09-17",
       "platform": "TickPick",
       "listed_price": 89,
-      "status": "open"
+      "status": "closed"
     },
     {
       "event": "Bob Moses",
@@ -41,14 +41,14 @@
       "event_date": "2026-08-08",
       "platform": "TickPick",
       "listed_price": 137,
-      "status": "open"
+      "status": "closed"
     },
     {
       "event": "Charlotte de Witte b2b Yousuke Yukimatsu",
       "event_date": "2026-08-08",
       "platform": "StubHub",
       "listed_price": 137,
-      "status": "open"
+      "status": "closed"
     }
   ]
 }
