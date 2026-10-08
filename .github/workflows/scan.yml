@@ -67,6 +67,10 @@ jobs:
           # output — that's the buffer, not the process, being idle. This
           # makes hang points visible in real time.
           PYTHONUNBUFFERED: "1"
+          # Opt-in only after the Discord app is deployed. No database required.
+          POSITION_REMOTE_REPO: ${{ vars.POSITION_REMOTE_REPO }}
+          POSITION_REMOTE_BRANCH: ${{ vars.POSITION_REMOTE_BRANCH }}
+          POSITION_READ_TOKEN: ${{ github.token }}
         run: python main.py
 
       - name: Save tracking data

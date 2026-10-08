@@ -41,6 +41,7 @@ from dateutil import parser as dateparser
 
 import config
 import matcher
+import position_store
 from undercut import SELLER_FEES
 
 THIN_MARGIN = 5.0                # dollars — operator-specified
@@ -78,6 +79,8 @@ def _seller_fee(platform: str) -> Optional[float]:
 
 
 def _position_id(p: dict) -> str:
+    if p.get("position_id"):
+        return p["position_id"]
     base = f"{p.get('event','')}|{p.get('event_date','')}|{p.get('platform','')}|{p.get('listed_price','')}"
     return re.sub(r"[^a-z0-9|.-]+", "-", base.lower())
 
@@ -86,7 +89,8 @@ def load_positions() -> tuple:
     """Returns (open_positions, problems). Malformed entries become
     problems instead of being silently dropped — silent monitoring
     failure on a real position is the dangerous case."""
-    data = _load_json(POSITIONS_FILE, {})
+    data = (position_store.load_remote() if position_store.remote_enabled()
+            else _load_json(POSITIONS_FILE, {}))
     raw = data.get("positions", [])
     open_positions, problems = [], []
     for i, p in enumerate(raw):
@@ -139,6 +143,18 @@ def _resolve(position: dict, cv_events: list):
         target_date = dateparser.parse(str(position["event_date"]))
     except (TypeError, ValueError):
         return None
+
+    # Discord additions require exact names/venue and a unique date match.
+    # Existing manually-managed positions retain their prior resolver.
+    if position.get("match_mode") == "exact":
+        matches = []
+        for ev in cv_events:
+            local = matcher._localize_cv_date(ev)
+            if (local is not None and matcher._dates_match(local, target_date)
+                    and ev.name.strip().casefold() == position["event"].strip().casefold()
+                    and ev.venue.strip().casefold() == position.get("venue", "").strip().casefold()):
+                matches.append(ev)
+        return matches[0] if len(matches) == 1 else None
 
     best, best_score = None, 0
     for ev in cv_events:
@@ -219,7 +235,15 @@ def _should_alert(pid: str, severity: str, state: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def scan(cv_events: list, dry_run: bool = False) -> list:
-    positions, problems = load_positions()
+    try:
+        positions, problems = load_positions()
+    except Exception:
+        # Keep the overall arbitrage scan alive; don't misreport storage failure
+        # as no positions or resurrect positions from an old checkout.
+        print("[Positions] ERROR: current position store unavailable; risk checks skipped", flush=True)
+        if not dry_run:
+            _send_problem_alert("Position storage unavailable: risk checks could not run. Saved positions were not changed.")
+        return []
     state = _load_json(STATE_FILE, {})
     alerts_sent = []
 
@@ -268,6 +292,16 @@ def scan(cv_events: list, dry_run: bool = False) -> list:
         if _should_alert(pid, severity, state):
             sent = True
             if not dry_run:
+                if position_store.remote_enabled():
+                    # A command may close/update a position during a long scan.
+                    try:
+                        latest, _ = load_positions()
+                    except Exception:
+                        print("[Positions] ERROR: cannot recheck position status; alert skipped", flush=True)
+                        continue
+                    if not any(_position_id(q) == pid and q == p for q in latest):
+                        print(f"[Positions] Changed or closed during scan: {pid}; alert skipped")
+                        continue
                 sent = _send_alert(p, cv, result)
             if sent:
                 alerts_sent.append((p, result))

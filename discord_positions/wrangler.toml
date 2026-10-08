@@ -1,0 +1,4 @@
+name = "ticket-position-commands"
+main = "worker.mjs"
+compatibility_date = "2026-10-07"
+# Set variables and secrets described in README.md before deploying.
