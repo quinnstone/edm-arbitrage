@@ -1,32 +1,86 @@
 import {test,afterEach} from 'node:test';
 import assert from 'node:assert/strict';
 import {generateKeyPairSync,sign} from 'node:crypto';
-import worker,{applyCommand,positionId,execute} from './worker.mjs';
+import worker,{applyCommand,positionId,execute,pricingSummary} from './worker.mjs';
 import {command} from './register.mjs';
-const args={event:'Charlotte de Witte',date:'2099-08-08',venue:'Under the K Bridge',platform:'StubHub',net_payout:'137.00'};
+const args={event:'Charlotte de Witte',date:'2099-08-08',venue:'Under the K Bridge',platform:'StubHub',listing_price:'137.00'};
 const doc=()=>({positions:[]});
 const fetchOriginal=globalThis.fetch;
 afterEach(()=>globalThis.fetch=fetchOriginal);
-test('add uses existing ID format and exact matching; payout is net',()=>{
+test('add uses existing ID format and exact matching; stores gross price with explicit basis',()=>{
  const d=doc();applyCommand(d,'add',args,'1');
  assert.equal(positionId(d.positions[0]),'charlotte-de-witte|2099-08-08|stubhub|137');assert.equal(d.positions[0].listed_price,137);assert.equal(d.positions[0].match_mode,'exact');
+ assert.equal(d.positions[0].price_basis,'listing');assert.equal(d.positions[0].seller_fee_pct,12.5);
 });
 test('same interaction delivery is idempotent',()=>{const d=doc();const a=applyCommand(d,'add',args,'1');assert.equal(applyCommand(d,'add',args,'1').message,a.message);assert.equal(d.positions.length,1);});
-test('interaction reuse with different input rejected',()=>{const d=doc();applyCommand(d,'add',args,'1');assert.throws(()=>applyCommand(d,'add',{...args,net_payout:'5'},'1'));});
-test('duplicate active position cannot overwrite payout',()=>{const d=doc();applyCommand(d,'add',args,'1');assert.throws(()=>applyCommand(d,'add',{...args,net_payout:'5'},'2'));assert.equal(d.positions[0].listed_price,137);});
+test('interaction reuse with different input rejected',()=>{const d=doc();applyCommand(d,'add',args,'1');assert.throws(()=>applyCommand(d,'add',{...args,listing_price:'5'},'1'));});
+test('duplicate active position cannot overwrite price',()=>{const d=doc();applyCommand(d,'add',args,'1');assert.throws(()=>applyCommand(d,'add',{...args,listing_price:'5'},'2'));assert.equal(d.positions[0].listed_price,137);});
 test('stop only one platform; repeat stop harmless',()=>{
  const d=doc();applyCommand(d,'add',args,'1');applyCommand(d,'add',{...args,platform:'TickPick'},'2');
  const id=positionId(d.positions[0]);applyCommand(d,'stop',{position:id},'3');applyCommand(d,'stop',{position:id},'4');assert.equal(d.positions[0].status,'closed');assert.equal(d.positions[1].status,'open');
 });
 test('update freezes legacy ID as well as new IDs',()=>{
  const d={positions:[{event:'Legacy',event_date:'2099-01-01',platform:'TickPick',listed_price:89,status:'open'}]};
- const id=positionId(d.positions[0]);applyCommand(d,'update',{position:id,net_payout:'88.75'},'1');assert.equal(positionId(d.positions[0]),id);assert.equal(d.positions[0].listed_price,88.75);
+ const id=positionId(d.positions[0]);applyCommand(d,'update',{position:id,listing_price:'88.75'},'1');assert.equal(positionId(d.positions[0]),id);assert.equal(d.positions[0].listed_price,88.75);assert.equal(d.positions[0].price_basis,'listing');assert.equal(d.positions[0].seller_fee_pct,15);
 });
-test('closed update and implicit reopen rejected',()=>{const d=doc();applyCommand(d,'add',args,'1');const id=positionId(d.positions[0]);applyCommand(d,'stop',{position:id},'2');assert.throws(()=>applyCommand(d,'update',{position:id,net_payout:90},'3'));assert.throws(()=>applyCommand(d,'add',args,'4'));});
+test('closed update and implicit reopen rejected',()=>{const d=doc();applyCommand(d,'add',args,'1');const id=positionId(d.positions[0]);applyCommand(d,'stop',{position:id},'2');assert.throws(()=>applyCommand(d,'update',{position:id,listing_price:90},'3'));assert.throws(()=>applyCommand(d,'add',args,'4'));});
 test('bad dates, amounts, platforms rejected',()=>{
- for(const delta of [{date:'2099-02-30'},{date:'01/02/2099'},{date:'2000-01-01'},{net_payout:'NaN'},{net_payout:'Infinity'},{net_payout:'-5'},{net_payout:'0'},{net_payout:'1.001'},{net_payout:true},{platform:'VividSeats'},{platform:'Gametime'},{event:''},{venue:''}]) assert.throws(()=>applyCommand(doc(),'add',{...args,...delta},'1'),JSON.stringify(delta));
+ for(const delta of [{date:'2099-02-30'},{date:'01/02/2099'},{date:'2000-01-01'},{listing_price:'NaN'},{listing_price:'Infinity'},{listing_price:'-5'},{listing_price:'0'},{listing_price:'1.001'},{listing_price:true},{platform:'VividSeats'},{platform:'Gametime'},{event:''},{venue:''}]) assert.throws(()=>applyCommand(doc(),'add',{...args,...delta},'1'),JSON.stringify(delta));
 });
 test('list is read only and warns not a price check',()=>{const d=doc();applyCommand(d,'add',args,'1');const snapshot=JSON.stringify(d);const r=applyCommand(d,'list',{},'2');assert.equal(JSON.stringify(d),snapshot);assert.match(r.message,/not a fresh price check/);});
+test('default fee calculations and messages are explicitly estimated',()=>{
+ for(const [platform,payout,fee] of [['TickPick','109.65',15],['StubHub','112.88',12.5]]){
+  const d=doc();const r=applyCommand(d,'add',{...args,platform,listing_price:'129'},'1');
+  assert.equal(d.positions[0].seller_fee_pct,fee);
+  assert.ok(r.message.includes(`estimated payout $${payout}`));assert.match(r.message,/default fee estimate/);
+  assert.ok(applyCommand(d,'list',{},'2').message.includes(`estimated payout $${payout}`));
+ }
+});
+test('custom fee including zero persists through price updates with stable ID',()=>{
+ for(const fee of ['10','0']){
+  const d=doc();applyCommand(d,'add',{...args,seller_fee_pct:fee},'1');const id=positionId(d.positions[0]);
+  const r=applyCommand(d,'update',{position:id,listing_price:'100'},'2');
+  assert.equal(positionId(d.positions[0]),id);assert.equal(d.positions[0].seller_fee_pct,Number(fee));
+  assert.ok(r.message.includes(`estimated payout $${fee==='10'?'90.00':'100.00'}`));assert.match(r.message,/your fee setting/);
+ }
+});
+test('exact payout override is not double charged and clears when price changes',()=>{
+ const d=doc();const r=applyCommand(d,'add',{...args,net_payout:'123.45'},'1');const id=positionId(d.positions[0]);
+ assert.match(r.message,/payout \$123.45 \(your override\)/);assert.doesNotMatch(r.message,/estimated payout/);
+ applyCommand(d,'update',{position:id,listing_price:'137'},'2');assert.equal(d.positions[0].net_payout_override,123.45);
+ applyCommand(d,'update',{position:id,listing_price:'129'},'3');assert.ok(!('net_payout_override' in d.positions[0]));
+ assert.match(pricingSummary(d.positions[0]),/estimated payout \$112.88/);assert.equal(positionId(d.positions[0]),id);
+});
+test('new fee clears an override and a new payout can be provided with a price change',()=>{
+ const d=doc();applyCommand(d,'add',{...args,net_payout:'120'},'1');const id=positionId(d.positions[0]);
+ applyCommand(d,'update',{position:id,listing_price:'137',seller_fee_pct:'10'},'2');assert.ok(!('net_payout_override' in d.positions[0]));
+ applyCommand(d,'update',{position:id,listing_price:'129',net_payout:'119'},'3');assert.equal(d.positions[0].net_payout_override,119);
+ assert.equal(d.positions[0].seller_fee_pct,10);
+});
+test('invalid fee or payout does not partly update the saved position',()=>{
+ for(const delta of [{seller_fee_pct:'100'},{seller_fee_pct:'-1'},{seller_fee_pct:'Infinity'},{seller_fee_pct:'1.001'},{seller_fee_pct:true},{net_payout:'0'},{net_payout:'NaN'},{net_payout:'130'},{seller_fee_pct:'15',net_payout:'100'}]){
+  const d=doc();applyCommand(d,'add',{...args,net_payout:'120'},'1');const snapshot=JSON.stringify(d);
+  assert.throws(()=>applyCommand(d,'update',{position:positionId(d.positions[0]),listing_price:'129',...delta},'2'));
+  assert.equal(JSON.stringify(d),snapshot);
+ }
+});
+test('legacy net entries are displayed as net without modification',()=>{
+ const d={positions:[{event:'Legacy',event_date:'2099-01-01',platform:'TickPick',listed_price:100,status:'open'}]};const snapshot=JSON.stringify(d);
+ assert.match(applyCommand(d,'list',{},'1').message,/Net payout \$100.00 \(legacy entry/);assert.equal(JSON.stringify(d),snapshot);
+});
+test('outdated net-only command is rejected with a registration instruction',()=>{
+ const {listing_price,...oldArgs}=args;
+ assert.throws(()=>applyCommand(doc(),'add',{...oldArgs,net_payout:'100'},'1'),/listing_price is required.*Re-register/);
+});
+test('registration requires price and makes fee and payout overrides optional',()=>{
+ for(const name of ['add','update']){
+  const opts=command.options.find(o=>o.name===name).options;
+  assert.equal(opts.find(o=>o.name==='listing_price').required,true);
+  assert.equal(opts.find(o=>o.name==='seller_fee_pct').required,false);
+  assert.equal(opts.find(o=>o.name==='net_payout').required,false);
+  let optional=false;for(const o of opts){if(!o.required)optional=true;else assert.equal(optional,false);}
+ }
+});
 test('missing or ambiguous stop cannot close anything',()=>{assert.throws(()=>applyCommand(doc(),'stop',{position:'x'},'1'));const p={position_id:'x',status:'open'};assert.throws(()=>applyCommand({positions:[{...p},{...p}]},'stop',{position:'x'},'1'));});
 test('malformed store rejected',()=>assert.throws(()=>applyCommand({},'list',{},'1')));
 test('GitHub SHA conflict retries fresh content without losing other position',async()=>{

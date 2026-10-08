@@ -10,9 +10,11 @@ purpose. The data/ Actions cache can be evicted without warning, which
 is fine for dedup state but unacceptable for records of real money at
 risk.
 
-Severity model (margin = payout − CV cheapest ask). IMPORTANT: the
-operator quotes listed_price WITH fees already accounted — it IS the
-expected payout. No further fee deduction is applied here.
+Severity model (margin = payout − CV cheapest ask). New Discord entries
+use price_basis="listing": listed_price is the asking price before seller
+fees. Payout uses the saved fee percentage or an explicit payout override.
+Legacy entries without price_basis already contain a net payout; their
+values must never have fees deducted again.
 
     healthy     margin >= $5     silent
     thin        $0 <= margin < 5 alert once on entry
@@ -27,13 +29,14 @@ no_supply / unresolved stay daily — those signal a system condition
 (scrape gap, delisting) rather than active loss escalation.
 
 Escalation always alerts immediately; recovery is silent (operator
-wants problem-alerts only). Checked every 15 min via main.scan_once.
+wants problem-alerts only). Checked when main.scan_once reaches this monitor.
 """
 
 import json
 import os
 import re
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Optional
 
 import requests
@@ -110,10 +113,10 @@ def load_positions() -> tuple:
                 f"(known: {', '.join(SELLER_FEES)})")
             continue
         try:
-            float(p["listed_price"])
+            _position_pricing(p)
             dateparser.parse(str(p["event_date"]))
-        except (TypeError, ValueError):
-            problems.append(f"entry #{i} ({p['event']!r}): bad listed_price or event_date")
+        except (TypeError, ValueError, InvalidOperation, KeyError):
+            problems.append(f"entry #{i} ({p['event']!r}): invalid price, fee, payout override, or event_date")
             continue
         open_positions.append(p)
     return open_positions, problems
@@ -167,31 +170,62 @@ def _resolve(position: dict, cv_events: list):
     return best
 
 
-def assess(position: dict, cv_event) -> dict:
-    """Compute payout / margin / severity for a resolved position.
+def _money(value) -> Decimal:
+    amount = Decimal(str(value))
+    if (not amount.is_finite() or amount <= 0 or amount > 1000000
+            or amount != amount.quantize(Decimal("0.01"))):
+        raise ValueError("Invalid USD amount")
+    return amount
 
-    listed_price is the operator's NET number — fees already accounted
-    per their quoting convention — so it is used as the payout directly.
-    The platform field is kept for records/validation only.
-    """
-    payout = float(position["listed_price"])
+
+def _position_pricing(position: dict) -> dict:
+    """Explicit price basis prevents double-deducting fees on old positions."""
+    price = _money(position["listed_price"])
+    basis = position.get("price_basis", "net")
+    if basis == "net":
+        return {"payout": float(price), "fees_estimated": False,
+                "pricing_note": "Net payout supplied; fees already accounted"}
+    if basis != "listing":
+        raise ValueError("Unknown price basis")
+    fee = Decimal(str(position["seller_fee_pct"]))
+    if (not fee.is_finite() or not 0 <= fee < 100
+            or fee != fee.quantize(Decimal("0.01"))):
+        raise ValueError("Invalid seller fee")
+    source = position.get("seller_fee_source")
+    if source not in ("operator", "default"):
+        raise ValueError("Missing seller fee source")
+    if "net_payout_override" in position:
+        payout = _money(position["net_payout_override"])
+        if payout > price:
+            raise ValueError("Payout exceeds listing price")
+        return {"payout": float(payout), "fees_estimated": False,
+                "pricing_note": "Your payout override; no further fee deduction"}
+    payout = (price * (1 - fee / 100)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    fee_label = "your fee setting" if source == "operator" else "default fee estimate"
+    return {"payout": float(payout), "fees_estimated": True,
+            "pricing_note": f"{float(fee):g}% {fee_label}; actual payout may differ"}
+
+
+def assess(position: dict, cv_event) -> dict:
+    """Compare the net or estimated payout to the existing CV all-in GA ask."""
+    pricing = _position_pricing(position)
 
     if cv_event is None:
-        return {"severity": "unresolved", "payout": round(payout, 2),
+        return {**pricing, "severity": "unresolved",
                 "min_ask": None, "margin": None}
     if cv_event.min_ask is None:
-        return {"severity": "no_supply", "payout": round(payout, 2),
+        return {**pricing, "severity": "no_supply",
                 "min_ask": None, "margin": None}
 
-    margin = payout - cv_event.min_ask
+    margin = Decimal(str(pricing["payout"])) - Decimal(str(cv_event.min_ask))
     if margin < 0:
         severity = "underwater"
     elif margin < THIN_MARGIN:
         severity = "thin"
     else:
         severity = "healthy"
-    return {"severity": severity, "payout": round(payout, 2),
-            "min_ask": cv_event.min_ask, "margin": round(margin, 2)}
+    return {**pricing, "severity": severity,
+            "min_ask": cv_event.min_ask, "margin": float(round(margin, 2))}
 
 
 # ---------------------------------------------------------------------------
@@ -284,10 +318,11 @@ def scan(cv_events: list, dry_run: bool = False) -> list:
         result = assess(p, cv)
         severity = result["severity"]
         margin_str = f"${result['margin']:+.2f}" if result["margin"] is not None else "n/a"
+        estimate_note = " (estimated payout)" if result["fees_estimated"] else ""
         print(f"  [Positions] {p['event']!r} [{p['platform']} @ ${p['listed_price']}] "
               f"payout=${result['payout']:.2f} ask="
               f"{('$%.0f' % result['min_ask']) if result['min_ask'] else 'NONE'} "
-              f"margin={margin_str} → {severity.upper()}")
+              f"margin={margin_str} → {severity.upper()}{estimate_note}")
 
         if _should_alert(pid, severity, state):
             sent = True
@@ -323,18 +358,19 @@ def _send_alert(position: dict, cv_event, result: dict) -> bool:
     if not config.DISCORD_WEBHOOK_URL:
         return False
     style = _SEVERITY_STYLE[result["severity"]]
+    estimated = result["fees_estimated"]
 
     fields = [
-        {"name": "Listed",
-         "value": f"${float(position['listed_price']):.0f} on {position['platform']}",
+        {"name": "Listing price" if position.get("price_basis") == "listing" else "Supplied net payout",
+         "value": f"${float(position['listed_price']):.2f} on {position['platform']}",
          "inline": True},
-        {"name": "Payout (fees already in)",
-         "value": f"${result['payout']:.2f}", "inline": True},
+        {"name": "Estimated payout" if estimated else "Payout (fees already accounted)",
+         "value": f"${result['payout']:.2f}\n{result['pricing_note']}", "inline": True},
     ]
     if result["min_ask"] is not None:
         fields.append({"name": "CV cheapest ask",
-                       "value": f"${result['min_ask']:.0f}", "inline": True})
-        fields.append({"name": "Margin if it sells now",
+                       "value": f"${result['min_ask']:.2f}", "inline": True})
+        fields.append({"name": "Estimated margin if it sells now" if estimated else "Margin if it sells now",
                        "value": f"**${result['margin']:+.2f}**", "inline": True})
     if cv_event is not None:
         fields.append({"name": "Links",
@@ -344,7 +380,7 @@ def _send_alert(position: dict, cv_event, result: dict) -> bool:
         "username": "Ticket Arb",
         "embeds": [{
             "title": f"{style['emoji']} Position Risk — {position['event']}",
-            "description": f"{style['label']}\n"
+            "description": ("Based on estimated payout: " if estimated else "") + f"{style['label']}\n"
                            f"Event date: {position['event_date']}",
             "color": style["color"],
             "fields": fields,

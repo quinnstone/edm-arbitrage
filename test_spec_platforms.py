@@ -20,6 +20,21 @@ def event(platform='Ticketmaster'):
 
 
 class SpecPlatformTests(unittest.TestCase):
+    def test_tickpick_fee_correction_preserves_fifteen_dollar_profit_gate(self):
+        cv = event()
+        with ExitStack() as stack:
+            for name in ('get_bid_trend', 'get_ask_trend', 'get_oldest_bid_age_hours', 'get_oldest_ask_age_hours'):
+                stack.enter_context(patch.object(undercut, name, return_value=None))
+            # At 10% this $74 listing incorrectly qualified ($16.60 profit).
+            # At 15% payout is $62.90 and profit $12.90: below the $15 gate.
+            opp = matcher.ArbitrageOpportunity(cv, 'TickPick', 74, 'https://example.com', 50, 50, 24, -24)
+            self.assertEqual(undercut.find_opportunities([opp], [cv]), [])
+            opp.source_price = 100
+            result = undercut.find_opportunities([opp], [cv])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].est_payout, 85)
+            self.assertEqual(result[0].est_profit, 35)
+
     def test_only_supported_destinations_can_be_candidates(self):
         cv = event()
         with ExitStack() as stack:

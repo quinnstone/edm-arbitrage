@@ -2,8 +2,10 @@
 import base64
 import json
 import os
+from pathlib import Path
+import subprocess
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,7 +20,7 @@ def position(**extra):
 
 def event(name='Example Artist',venue='Example Club',date=None,ask=102):
     return SimpleNamespace(name=name,venue=venue,city='New York',
-        event_date=date or datetime(2099,8,9,2),min_ask=ask)
+        event_date=date or datetime(2099,8,9,2),min_ask=ask,url='https://example.com/event')
 
 
 class DiscordPositions(unittest.TestCase):
@@ -115,5 +117,113 @@ class DiscordPositions(unittest.TestCase):
     def test_margin_boundaries_unchanged(self):
         for ask,severity in [(95,'healthy'),(95.01,'thin'),(100,'thin'),(100.01,'underwater'),(None,'no_supply')]:
             self.assertEqual(pm.assess(position(),event(ask=ask))['severity'],severity)
+
+    def test_listing_price_fee_math_and_cent_boundaries(self):
+        for fee, payout in [(15, 109.65), (12.5, 112.88), (0, 129)]:
+            p = {**position(), 'listed_price': 129, 'price_basis': 'listing',
+                 'seller_fee_pct': fee, 'seller_fee_source': 'default'}
+            for ask, severity in [(payout-5, 'healthy'), (payout-4.99, 'thin'),
+                                  (payout, 'thin'), (payout+0.01, 'underwater')]:
+                result = pm.assess(p, event(ask=round(ask, 2)))
+                self.assertEqual(result['payout'], payout)
+                self.assertEqual(result['severity'], severity)
+                self.assertTrue(result['fees_estimated'])
+
+    def test_legacy_payout_and_override_are_not_double_deducted(self):
+        legacy = pm.assess(position(), event(ask=90))
+        self.assertEqual(legacy['payout'], 100)
+        self.assertEqual(legacy['margin'], 10)
+        self.assertFalse(legacy['fees_estimated'])
+        p = position(price_basis='listing', seller_fee_pct=15,
+                     seller_fee_source='operator', net_payout_override=95)
+        result = pm.assess(p, event(ask=90))
+        self.assertEqual(result['payout'], 95)
+        self.assertEqual(result['margin'], 5)
+        self.assertFalse(result['fees_estimated'])
+
+    def test_invalid_pricing_reports_problem_without_dropping_good_positions(self):
+        for delta in [{'price_basis': 'gross'}, {'listed_price': float('nan')},
+                      {'listed_price': -5}, {'seller_fee_pct': 100},
+                      {'seller_fee_pct': float('inf')}, {'seller_fee_pct': None},
+                      {'seller_fee_pct': -1}, {'seller_fee_pct': 1.001},
+                      {'seller_fee_source': 'unknown'}, {'net_payout_override': 101},
+                      {'net_payout_override': 0}]:
+            p = {**position(price_basis='listing', seller_fee_pct=15,
+                           seller_fee_source='default'), **delta}
+            with self.subTest(delta=delta), patch.dict(os.environ, {}, clear=True), \
+                 patch.object(pm, '_load_json', return_value={'positions': [p, position()]}):
+                good, problems = pm.load_positions()
+                self.assertEqual(good, [position()])
+                self.assertEqual(len(problems), 1)
+
+    def test_alert_displays_listing_price_payout_fee_and_estimated_margin(self):
+        for override in (None, 90):
+            p = position(price_basis='listing', seller_fee_pct=15, seller_fee_source='default')
+            if override is not None:
+                p['net_payout_override'] = override
+            result = pm.assess(p, event(ask=96.75))
+            with patch.object(pm.config, 'DISCORD_WEBHOOK_URL', 'https://example.invalid'), \
+                 patch.object(pm.requests, 'post') as post:
+                self.assertTrue(pm._send_alert(p, event(), result))
+                embed = post.call_args.kwargs['json']['embeds'][0]
+                fields = {f['name']: f['value'] for f in embed['fields']}
+                self.assertEqual(fields['Listing price'], '$100.00 on StubHub')
+                self.assertEqual(fields['CV cheapest ask'], '$96.75')
+                if override is None:
+                    self.assertIn('$85.00', fields['Estimated payout'])
+                    self.assertIn('15% default fee estimate', fields['Estimated payout'])
+                    self.assertIn('Estimated margin if it sells now', fields)
+                    self.assertIn('Based on estimated payout', embed['description'])
+                else:
+                    self.assertIn('$90.00', fields['Payout (fees already accounted)'])
+                    self.assertIn('Margin if it sells now', fields)
+                    self.assertNotIn('Based on estimated payout', embed['description'])
+
+    def test_js_saved_price_changes_are_used_by_actual_python_monitor(self):
+        script = '''
+          import {applyCommand,positionId,pricingSummary} from './discord_positions/worker.mjs';
+          const d={positions:[]}, snapshots=[];
+          const save=()=>snapshots.push({document:structuredClone(d),message:pricingSummary(d.positions[0])});
+          applyCommand(d,'add',{event:'Example Artist',date:'2099-08-08',venue:'Example Club',platform:'TickPick',listing_price:'100'},'1');save();
+          const id=positionId(d.positions[0]);
+          applyCommand(d,'update',{position:id,listing_price:'120'},'2');save();
+          applyCommand(d,'update',{position:id,listing_price:'120',net_payout:'110'},'3');save();
+          applyCommand(d,'update',{position:id,listing_price:'130'},'4');save();
+          applyCommand(d,'stop',{position:id},'5');save();
+          console.log(JSON.stringify(snapshots));
+        '''
+        snapshots = json.loads(subprocess.check_output(['node', '--input-type=module', '-e', script],
+                               cwd=Path(__file__).parent, text=True))
+        original_id = snapshots[0]['document']['positions'][0]['position_id']
+        for index, payout in enumerate((85, 102, 110, 110.5)):
+            snapshot = snapshots[index]
+            with patch.dict(os.environ, {}, clear=True), \
+                 patch.object(pm, '_load_json', return_value=snapshot['document']):
+                positions, problems = pm.load_positions()
+            self.assertEqual(problems, [])
+            p = positions[0]
+            self.assertEqual(pm._position_id(p), original_id)
+            result = pm.assess(p, pm._resolve(p, [event(ask=90)]))
+            self.assertEqual(result['payout'], payout)
+            self.assertEqual(result['margin'], payout - 90)
+            self.assertIn(f'payout ${payout:.2f}', snapshot['message'])
+            with patch.dict(os.environ, {}, clear=True), \
+                 patch.object(pm, 'load_positions', return_value=([p], [])), \
+                 patch.object(pm, '_load_json', return_value={}), \
+                 patch.object(pm, '_save_state'), patch.object(pm, '_send_alert', return_value=True) as send:
+                alerts = pm.scan([event(ask=90)])
+                self.assertEqual(bool(alerts), index == 0)
+                self.assertEqual(send.called, index == 0)
+        with patch.dict(os.environ, {}, clear=True), \
+             patch.object(pm, '_load_json', return_value=snapshots[-1]['document']):
+            self.assertEqual(pm.load_positions(), ([], []))
+
+    def test_hourly_reminders_and_thin_cooldown_remain_unchanged(self):
+        for minutes, expected in [(30, False), (61, True)]:
+            state = {'p': {'severity': 'underwater',
+                          'last_alert': (datetime.now()-timedelta(minutes=minutes)).isoformat()}}
+            self.assertEqual(pm._should_alert('p', 'underwater', state), expected)
+        self.assertFalse(pm._should_alert('p', 'thin', {'p': {'severity': 'thin'}}))
+        self.assertTrue(pm._should_alert('p', 'underwater', {'p': {'severity': 'thin'}}))
 
 if __name__=='__main__': unittest.main()

@@ -30,13 +30,10 @@ from matcher import ArbitrageOpportunity
 
 # Estimated seller fees per platform (what the platform takes from the seller).
 # These are distinct from buyer fees in config.py.
-SELLER_FEES = {
-    "StubHub": 0.125,
-    "VividSeats": 0.125,
-    "SeatGeek": 0.125,
-    "TickPick": 0.10,
-    "Gametime": 0.10,
-}
+# Shared percentage defaults with Discord position entry. TickPick's standard
+# commission is 15%; StubHub's 12.5% remains an estimate, not an account quote.
+with open(os.path.join(os.path.dirname(__file__), "discord_positions", "seller_fees.json")) as _fees_file:
+    SELLER_FEES = {name: percent / 100 for name, percent in json.load(_fees_file).items()}
 
 # Don't re-alert the same event within this window. 18h sits between the
 # 4h same-day-digest gap (1pm→5pm) and the 20h next-day cross-digest gap
@@ -717,7 +714,7 @@ def _format_alert(opp: SpeculativeOpportunity) -> dict:
     if ask_age:
         signals.append(f"oldest ask {ask_age}")
 
-    fee_pct = int(opp.seller_fee_pct * 100)
+    fee_pct = f"{opp.seller_fee_pct * 100:g}"
     price_note = " (est.)" if opp.fees_estimated else ""
 
     return {
